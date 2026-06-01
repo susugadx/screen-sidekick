@@ -8,18 +8,22 @@ repository editor. The app captures and normalizes screen context, previews
 safety-sensitive information, and generates a handoff that a user can pass to
 Codex.
 
-## Phase 0-A Status
+## Phase 0-B Status
 
-This repository currently contains the initial scaffold only:
+This repository contains the first vertical slice:
 
 - Rust workspace for core domain crates.
 - `RawScreenContext` / `ScreenContext v0.1` typed payloads.
 - Safety rules for danger/redaction policy plus safety review primitives.
 - Prompt preview generation from a `SanitizedScreenContext`.
-- Placeholder desktop and browser extension adapter directories.
+- `capture-pipeline` for `raw_browser_context.v0.1` browser captures,
+  sanitized ScreenContext JSON, safety summary, and prompt response generation.
+- Tauri v2 desktop bridge status shell in `apps/desktop`.
+- Chrome/Edge side panel adapter in `apps/extension`.
 
-Phase 0-A intentionally does not add Tauri, Leptos, Trunk, npm build tooling, or
-browser automation.
+Phase 0-B uses a loopback HTTP bridge for local validation. It does not add
+browser automation, MCP execution, Computer Use, local repository editing, or
+automatic Codex submission.
 
 ## Repository Layout
 
@@ -28,8 +32,9 @@ crates/screen-context  RawScreenContext / ScreenContext v0.1 types and serializa
 crates/safety-rules    pure danger detection and text/URL redaction policy
 crates/safety          SafetyReview and SanitizedScreenContext owner
 crates/prompt          Codex-ready prompt preview owner; consumes safety-reviewed context
-apps/desktop           future Tauri + Leptos application boundary
-apps/extension         Chrome/Edge adapter scaffold
+crates/capture-pipeline raw browser capture DTO and sanitized side panel response owner
+apps/desktop           Tauri + Leptos bridge status shell and loopback bridge transport
+apps/extension         Chrome/Edge side panel adapter
 docs/                  architecture and non-executor boundary notes
 ```
 
@@ -44,5 +49,4 @@ make check
 ```
 
 See [docs/development.md](docs/development.md) for the full setup notes.
-
-The extension scaffold has no package manager or TypeScript check in Phase 0-A.
+See [docs/phase-0-b.md](docs/phase-0-b.md) for bridge and extension run notes.

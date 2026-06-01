@@ -1,6 +1,6 @@
-# Browser Extension Scaffold
+# Browser Extension
 
-This directory is a placeholder for the Chrome/Edge adapter.
+This directory owns the Chrome/Edge side panel adapter.
 
 The extension may own:
 
@@ -19,7 +19,15 @@ The extension must not own:
 - Handoff execution.
 - Browser automation.
 
-Phase 0-A has no TypeScript package, bundler, or type check. Manifest-wired
-entrypoints must be loadable JavaScript files, so the MV3 service worker points
-to `src/background.js`. The TypeScript files are intentionally thin, unwired
-entrypoint placeholders until build tooling exists.
+## Checks
+
+```sh
+npm install
+npm run typecheck
+npm run build
+npm test
+node check-manifest.mjs
+```
+
+Build before loading the directory as an unpacked extension. The generated
+`dist/` directory is intentionally ignored by git.

@@ -5,5 +5,7 @@ node_modules/
 /dist/
 /build/
 
+apps/extension/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/ui/dist/
+apps/desktop/ui/target/

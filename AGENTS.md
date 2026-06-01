@@ -118,6 +118,37 @@ input values はデフォルトで mask する。
 
 raw capture / adapter 由来の context は `RawScreenContext` / `ScreenContext v0.1` として扱い、prompt / handoff 生成では `crates/safety` が生成した `SanitizedScreenContext` だけを読む。
 
+Rust-first の境界では、raw DTO、正規化済み domain 型、sanitized output 型を混ぜてはならない。最終 output response、prompt、handoff、UI preview は raw 型を直接 serialize せず、`SanitizedScreenContext` または validate 済み primitive / enum だけを受け取る設計にする。
+
+Rust では sanitization 境界を「sanitize したつもり」ではなく「sanitize 済みでないと渡せない」型契約で固定する。raw capture 由来の型と sanitized sink 用の型は、同じ `String` field を持つだけの構造体として共有してはならない。
+
+基本の流れは次に固定する:
+
+* `RawScreenContext`
+* `crates/safety` による review / sanitization
+* `SanitizedScreenContext`
+* prompt / handoff / UI preview 用 response
+
+prompt / handoff / UI preview などの final sink crate は、raw 型や未分類の `String` を直接受け取ってはならない。`build_codex_prompt` のような sink-facing API は `SanitizedScreenContext`、`PromptSafeText`、`SanitizedUrl`、validated enum / numeric metadata だけを入力にする。sink 内で追加の masking を行う設計にせず、sink に到達する前の型境界で raw value を排除する。
+
+page / user / browser-originated text を final sink に出す場合は、汎用 newtype を優先する:
+
+* `PromptSafeText`: prompt / preview に出せる sanitized text
+* `SanitizedUrl`: secret-bearing path / query / fragment を処理済みの URL
+* constrained metadata: `ScreenshotFormat`、timestamp 型、numeric dimension など validate 済み metadata
+
+`PromptSafeText(String)` や `SanitizedUrl(String)` の内部値と unchecked constructor は、原則として safety owner の crate / module 内に閉じる。外側の crate から raw string で直接生成できる public constructor を作ってはならない。やむを得ず unchecked constructor を置く場合は `pub(crate)` 以下にし、caller に「sanitize 済み」と主張させる API にしない。
+
+newtype は field ごとに無制限に増やさない。`RawTitle`、`SanitizedTitle`、`RawButtonText`、`SanitizedButtonText` のような過剰分割ではなく、同じ safety policy を共有する text は `PromptSafeText` に寄せる。field 固有の validation / display policy がある場合だけ専用型を追加する。
+
+`String` field を追加する場合は、その値が以下のどれかを実装前に分類する:
+
+* page / user / browser-originated raw text
+* extension / app が生成した trusted text
+* enum、timestamp、number など validate / parse 済みの constrained metadata
+
+page / user / browser-originated raw text は、最終 output sink までに `crates/safety` を通す。metadata として見える field でも、raw capture から来る `format`、`captured_at`、browser/page metadata は trusted 扱いしない。constrained metadata にできる field は Rust 側で enum / timestamp / numeric 型に validate し、不正値は拒否または drop する。
+
 特に以下は prompt / handoff 出力前に `crates/safety` を通す:
 
 * page URL の path / query / fragment
@@ -125,6 +156,7 @@ raw capture / adapter 由来の context は `RawScreenContext` / `ScreenContext 
 * input values
 * button / input labels
 * title / aria-label / placeholder
+* screenshot / browser metadata の string field
 * 将来追加する browser / page metadata
 
 URL は origin と non-secret path を可能な限り残し、secret-like path segment / query / fragment value を `[REDACTED]` にする。
@@ -136,6 +168,10 @@ prompt crate、UI、adapter に場当たり的な redaction / masking を追加�
 prompt preview、handoff JSON、logs、UI preview に出力する field を追加・変更する場合は、出力側の code path から逆算して、各 emitted field が `crates/safety` の sanitization を通っていることを確認する。
 
 field list を人間が思い出して列挙するだけで完了扱いしない。`prompt` / `handoff` / `UI` が実際に出力している field を source of truth として確認する。
+
+Rust response / JSON serializer が実際に emit する全 string field を inventory し、各 field を `sanitized` / `validated-constrained` / `generated` / `not emitted` のいずれかに分類する。分類できない raw string が残る場合は完了扱いしない。
+
+新しい output field を追加したら、最終 sink 経由の leak test を追加する。domain model の unit test だけではなく、bridge response、`screen_context_json`、prompt text、handoff JSON など実際の sink から raw secret が出ないことを確認する。
 
 prompt 出力では page / user-originated field を raw interpolation せず、改行や prompt-like text が top-level line を作れない形に quote / escape する。
 
@@ -176,6 +212,8 @@ visible controls を優先する。
 Codex に送信する controls の数を制限する。
 
 より詳細な文脈が必要な場合は、デフォルトですべてを送るのではなく、明示的な “more context” request を追加する。
+
+TypeScript adapter で page-originated text を trim / truncate して bridge JSON に入れる場合は、UTF-16 code unit の途中で切らない。`slice(0, n)` だけで emoji / surrogate pair を切る実装は禁止し、code point-safe な helper を使い、境界位置の emoji を含むテストを置く。
 
 ## 安全性方針
 

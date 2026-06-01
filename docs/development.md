@@ -7,10 +7,15 @@ extension and future desktop UI are adapters around the Rust crates.
 
 - Rust through `rustup`
 - `rustfmt` and `clippy`
-- Node.js for the Phase 0-A manifest JSON check
+- Node.js and npm for the extension TypeScript build
 
-No npm package, Tauri dependency, Leptos dependency, or Trunk dependency is
-installed in Phase 0-A.
+The Tauri app uses system webview dependencies. On Linux, install the Tauri v2
+system prerequisites for your distribution before running the default desktop
+check. This environment may report missing `pkg-config` or DBus/WebKit packages;
+do not install them from automation unless explicitly requested.
+
+The Leptos UI build requires `trunk` and the `wasm32-unknown-unknown` Rust
+target.
 
 ## Setup
 
@@ -20,6 +25,7 @@ Install Rust with `rustup`, then install the repository toolchain:
 source "$HOME/.cargo/env"
 make setup
 make doctor
+npm --prefix apps/extension install
 ```
 
 The repository includes `rust-toolchain.toml`, so `cargo`, `rustfmt`, and
@@ -43,11 +49,30 @@ Or run individual checks:
 make fmt
 make clippy
 make test
+make extension-typecheck
+make extension-build
+make extension-test
 make extension-manifest-check
+make desktop-bridge-test
 ```
 
-## Future Tauri Setup
+The desktop bridge handler tests avoid Tauri system webview dependencies:
 
-Tauri, Leptos, Trunk, and OS-level Tauri prerequisites are intentionally deferred
-until the desktop app is introduced. Adding them now would expand Phase 0-A
-beyond the current Rust-first scaffold.
+```sh
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
+```
+
+The full Tauri check uses the default desktop feature and requires OS
+prerequisites:
+
+```sh
+cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+The Leptos UI check requires Trunk or a wasm target check:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo check --manifest-path apps/desktop/ui/Cargo.toml --target wasm32-unknown-unknown
+trunk build apps/desktop/ui/index.html --release --dist apps/desktop/ui/dist
+```

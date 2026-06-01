@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const SCREEN_CONTEXT_SCHEMA_VERSION: &str = "0.1";
 pub const MASKED_VALUE: &str = "[masked]";
@@ -9,18 +9,16 @@ pub const MASKED_VALUE: &str = "[masked]";
 pub struct RawScreenContext {
     pub schema_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub page: Option<PageMetadata>,
+    pub page: Option<RawPageMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub screenshot: Option<ScreenshotMetadata>,
+    pub screenshot: Option<RawScreenshotMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub buttons: Option<Vec<Button>>,
+    pub buttons: Option<Vec<RawButton>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub inputs: Option<Vec<Input>>,
+    pub inputs: Option<Vec<RawInput>>,
 }
-
-pub type ScreenContext = RawScreenContext;
 
 impl RawScreenContext {
     #[must_use]
@@ -36,7 +34,7 @@ impl RawScreenContext {
     }
 
     #[must_use]
-    pub fn buttons(&self) -> &[Button] {
+    pub fn buttons(&self) -> &[RawButton] {
         match self.buttons.as_deref() {
             Some(buttons) => buttons,
             None => &[],
@@ -44,7 +42,7 @@ impl RawScreenContext {
     }
 
     #[must_use]
-    pub fn inputs(&self) -> &[Input] {
+    pub fn inputs(&self) -> &[RawInput] {
         match self.inputs.as_deref() {
             Some(inputs) => inputs,
             None => &[],
@@ -59,7 +57,7 @@ impl Default for RawScreenContext {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PageMetadata {
+pub struct RawPageMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,19 +65,87 @@ pub struct PageMetadata {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScreenshotMetadata {
+pub struct RawScreenshotMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
+    pub format: Option<ScreenshotFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub captured_at: Option<String>,
+    pub captured_at: Option<CapturedAt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl ScreenshotFormat {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "png" => Some(Self::Png),
+            "jpeg" => Some(Self::Jpeg),
+            "webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Webp => "webp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedAt(String);
+
+impl CapturedAt {
+    #[must_use]
+    pub fn parse_extension_iso_millis_utc(value: String) -> Option<Self> {
+        if is_valid_extension_timestamp(&value) {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for CapturedAt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapturedAt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse_extension_iso_millis_utc(value)
+            .ok_or_else(|| serde::de::Error::custom("invalid captured_at timestamp"))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Button {
+pub struct RawButton {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,7 +158,7 @@ pub struct Button {
     pub visible: Option<bool>,
 }
 
-impl Button {
+impl RawButton {
     #[must_use]
     pub fn is_visible(&self) -> bool {
         !matches!(self.visible, Some(false))
@@ -100,7 +166,7 @@ impl Button {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Input {
+pub struct RawInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<InputKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,10 +184,10 @@ pub struct Input {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<InputValue>,
+    pub value: Option<RawInputValue>,
 }
 
-impl Input {
+impl RawInput {
     #[must_use]
     pub fn is_visible(&self) -> bool {
         !matches!(self.visible, Some(false))
@@ -146,12 +212,12 @@ pub enum InputKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputValue {
+pub struct RawInputValue {
     text: String,
     masked: bool,
 }
 
-impl InputValue {
+impl RawInputValue {
     #[must_use]
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
@@ -177,4 +243,70 @@ impl InputValue {
     pub fn is_masked(&self) -> bool {
         self.masked
     }
+}
+
+fn is_valid_extension_timestamp(timestamp: &str) -> bool {
+    let bytes = timestamp.as_bytes();
+    if bytes.len() != 24
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'.'
+        || bytes[23] != b'Z'
+    {
+        return false;
+    }
+
+    let Some(year) = parse_fixed_digits(bytes, 0, 4) else {
+        return false;
+    };
+    let Some(month) = parse_fixed_digits(bytes, 5, 2) else {
+        return false;
+    };
+    let Some(day) = parse_fixed_digits(bytes, 8, 2) else {
+        return false;
+    };
+    let Some(hour) = parse_fixed_digits(bytes, 11, 2) else {
+        return false;
+    };
+    let Some(minute) = parse_fixed_digits(bytes, 14, 2) else {
+        return false;
+    };
+    let Some(second) = parse_fixed_digits(bytes, 17, 2) else {
+        return false;
+    };
+
+    parse_fixed_digits(bytes, 20, 3).is_some()
+        && (1..=12).contains(&month)
+        && (1..=days_in_month(year, month)).contains(&day)
+        && hour <= 23
+        && minute <= 59
+        && second <= 59
+}
+
+fn parse_fixed_digits(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
+    let mut value = 0;
+    for byte in bytes.get(start..start + len)? {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u32::from(*byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }

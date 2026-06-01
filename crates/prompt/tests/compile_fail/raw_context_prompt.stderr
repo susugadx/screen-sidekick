@@ -1,0 +1,21 @@
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/compile_fail/raw_context_prompt.rs:6:19
+  |
+6 |     let _prompt = build_codex_prompt(&context);
+  |                   ^^^^^^^^^^^^^^^^^^----------
+  |                                     ||
+  |                                     |expected `&SanitizedScreenContext`, found `&RawScreenContext`
+  |                                     argument #2 of type `&screen_sidekick_safety::PromptSafetyReview<'_>` is missing
+  |
+  = note: expected reference `&screen_sidekick_safety::SanitizedScreenContext`
+             found reference `&RawScreenContext`
+note: function defined here
+ --> src/lib.rs
+  |
+  | pub fn build_codex_prompt(
+  |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+  |
+6 -     let _prompt = build_codex_prompt(&context);
+6 +     let _prompt = build_codex_prompt(/* &screen_sidekick_safety::SanitizedScreenContext */, /* &screen_sidekick_safety::PromptSafetyReview<'_> */);
+  |

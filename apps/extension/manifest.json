@@ -3,12 +3,15 @@
   "name": "Screen Sidekick",
   "version": "0.0.0",
   "description": "Capture visual context for a user-reviewed Codex handoff.",
-  "permissions": ["activeTab", "sidePanel"],
+  "permissions": ["activeTab", "scripting", "sidePanel", "storage", "tabs"],
   "action": {
     "default_title": "Screen Sidekick"
   },
+  "side_panel": {
+    "default_path": "side_panel.html"
+  },
   "background": {
-    "service_worker": "src/background.js",
+    "service_worker": "dist/background.js",
     "type": "module"
   }
 }

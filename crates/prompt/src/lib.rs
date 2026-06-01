@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
-use screen_sidekick_safety::SafetyReview;
-use screen_sidekick_screen_context::{Button, Input};
+use screen_sidekick_safety::{
+    PromptSafetyReview, SanitizedButton, SanitizedInput, SanitizedScreenContext,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexPrompt {
@@ -11,8 +12,10 @@ pub struct CodexPrompt {
 pub type PromptPreview = CodexPrompt;
 
 #[must_use]
-pub fn build_codex_prompt(review: &SafetyReview) -> CodexPrompt {
-    let context = review.sanitized_context();
+pub fn build_codex_prompt(
+    context: &SanitizedScreenContext,
+    safety: &PromptSafetyReview<'_>,
+) -> CodexPrompt {
     let mut lines = Vec::new();
 
     lines.push("Screen Sidekick handoff for Codex.".to_owned());
@@ -23,10 +26,10 @@ pub fn build_codex_prompt(review: &SafetyReview) -> CodexPrompt {
     ));
 
     if let Some(page) = context.page() {
-        if let Some(title) = page.title.as_deref() {
+        if let Some(title) = page.title() {
             lines.push(format!("Page title: {}", quote_context_value(title)));
         }
-        if let Some(url) = page.url.as_deref() {
+        if let Some(url) = page.url() {
             lines.push(format!("URL: {}", quote_context_value(url)));
         }
     }
@@ -38,7 +41,7 @@ pub fn build_codex_prompt(review: &SafetyReview) -> CodexPrompt {
         ));
     }
 
-    push_safety_findings(review, &mut lines);
+    push_safety_findings(safety, &mut lines);
     push_buttons(context.buttons(), &mut lines);
     push_inputs(context.inputs(), &mut lines);
 
@@ -47,13 +50,13 @@ pub fn build_codex_prompt(review: &SafetyReview) -> CodexPrompt {
     }
 }
 
-fn push_safety_findings(review: &SafetyReview, lines: &mut Vec<String>) {
+fn push_safety_findings(safety: &PromptSafetyReview<'_>, lines: &mut Vec<String>) {
     lines.push("Safety review:".to_owned());
 
-    if review.findings().is_empty() {
+    if safety.findings().is_empty() {
         lines.push("- No dangerous action labels detected.".to_owned());
     } else {
-        for finding in review.findings() {
+        for finding in safety.findings() {
             lines.push(format!(
                 "- Warning: {} from {} keyword `{}`.",
                 finding.category.warning_label(),
@@ -63,33 +66,29 @@ fn push_safety_findings(review: &SafetyReview, lines: &mut Vec<String>) {
         }
     }
 
-    if review.masked_input_values() > 0 {
+    if safety.masked_input_values() > 0 {
         lines.push(format!(
             "- Masked {} input value(s).",
-            review.masked_input_values()
+            safety.masked_input_values()
         ));
     }
 
-    if review.masked_secret_texts() > 0 {
+    if safety.masked_secret_texts() > 0 {
         lines.push(format!(
             "- Masked {} secret-like text field(s).",
-            review.masked_secret_texts()
+            safety.masked_secret_texts()
         ));
     }
 }
 
-fn push_buttons(buttons: &[Button], lines: &mut Vec<String>) {
+fn push_buttons(buttons: &[SanitizedButton], lines: &mut Vec<String>) {
     lines.push("Visible buttons:".to_owned());
 
     let mut visible_count = 0;
     for button in buttons.iter().filter(|button| button.is_visible()) {
         visible_count += 1;
-        let label = first_non_empty(&[
-            button.text.as_deref(),
-            button.aria_label.as_deref(),
-            button.title.as_deref(),
-        ])
-        .unwrap_or("(unlabeled button)");
+        let label = first_non_empty(&[button.text(), button.aria_label(), button.title()])
+            .unwrap_or("(unlabeled button)");
 
         lines.push(format!("- {}", quote_context_value(label)));
     }
@@ -99,22 +98,22 @@ fn push_buttons(buttons: &[Button], lines: &mut Vec<String>) {
     }
 }
 
-fn push_inputs(inputs: &[Input], lines: &mut Vec<String>) {
+fn push_inputs(inputs: &[SanitizedInput], lines: &mut Vec<String>) {
     lines.push("Visible inputs:".to_owned());
 
     let mut visible_count = 0;
     for input in inputs.iter().filter(|input| input.is_visible()) {
         visible_count += 1;
         let label = first_non_empty(&[
-            input.label.as_deref(),
-            input.aria_label.as_deref(),
-            input.title.as_deref(),
-            input.placeholder.as_deref(),
-            input.name.as_deref(),
+            input.label(),
+            input.aria_label(),
+            input.title(),
+            input.placeholder(),
+            input.name(),
         ])
         .unwrap_or("(unlabeled input)");
 
-        match input.value.as_ref() {
+        match input.value() {
             Some(value) => lines.push(format!(
                 "- {}: {}",
                 quote_context_value(label),

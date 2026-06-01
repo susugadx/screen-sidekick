@@ -1,19 +1,19 @@
 use screen_sidekick_screen_context::{
-    Button, PageMetadata, ScreenContext, SCREEN_CONTEXT_SCHEMA_VERSION,
+    RawButton, RawPageMetadata, RawScreenContext, SCREEN_CONTEXT_SCHEMA_VERSION,
 };
 use serde_json::json;
 
 #[test]
 fn serializes_v0_1_with_optional_fields_omitted() {
-    let mut context = ScreenContext::new();
-    context.page = Some(PageMetadata {
+    let mut context = RawScreenContext::new();
+    context.page = Some(RawPageMetadata {
         url: Some("https://example.test/admin".to_owned()),
         title: Some("Admin".to_owned()),
     });
-    context.buttons = Some(vec![Button {
+    context.buttons = Some(vec![RawButton {
         text: Some("Save".to_owned()),
         visible: Some(true),
-        ..Button::default()
+        ..RawButton::default()
     }]);
 
     let value = serde_json::to_value(&context).expect("screen context serializes");
@@ -31,7 +31,7 @@ fn deserializes_missing_optional_fields_and_ignores_unknown_fields() {
         "future_field": {"ignored": true}
     }"#;
 
-    let context: ScreenContext = serde_json::from_str(json).expect("unknown fields are ignored");
+    let context: RawScreenContext = serde_json::from_str(json).expect("unknown fields are ignored");
 
     assert_eq!(context.schema_version, SCREEN_CONTEXT_SCHEMA_VERSION);
     assert!(context.page.is_none());

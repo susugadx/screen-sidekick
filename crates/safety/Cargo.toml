@@ -8,3 +8,5 @@ publish = false
 [dependencies]
 screen-sidekick-screen-context.workspace = true
 screen-sidekick-safety-rules.workspace = true
+serde.workspace = true
+serde_json.workspace = true
