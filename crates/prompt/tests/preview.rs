@@ -73,6 +73,31 @@ fn prompt_quotes_page_originated_text_before_final_sink() {
 }
 
 #[test]
+fn prompt_final_sink_redacts_hash_router_route_assignments_without_query() {
+    for raw_url in [
+        "https://example.test/#/callback/access_token=FRAGSECRET",
+        "https://example.test/#/callback/clientSecret=FRAGSECRET",
+    ] {
+        let mut context = ScreenContext::new();
+        context.page = Some(PageMetadata {
+            title: None,
+            url: Some(raw_url.to_owned()),
+        });
+
+        let review = review_screen_context(&context);
+        let preview = build_codex_prompt(&review);
+
+        assert!(preview
+            .text
+            .contains("URL: \"https://example.test/#[REDACTED]\""));
+        assert!(
+            !preview.text.contains("FRAGSECRET"),
+            "prompt leaked raw fragment secret for URL: {raw_url}"
+        );
+    }
+}
+
+#[test]
 fn prompt_final_sink_does_not_leak_raw_secret_values() {
     let raw_url = concat!(
         "https://example.test/reset/sk-PATHSECRET?",

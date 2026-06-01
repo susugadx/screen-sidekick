@@ -138,11 +138,15 @@ fn redact_fragment(fragment: Option<&str>) -> (Option<String>, bool) {
                     )
                 }
                 None => {
-                    let (redacted_fragment, fragment_was_redacted) =
-                        redact_pair_list(Some(fragment));
-                    match redacted_fragment {
-                        Some(redacted_fragment) => (redacted_fragment, fragment_was_redacted),
-                        None => (fragment.to_owned(), false),
+                    if is_hash_router_route(fragment) {
+                        redact_fragment_route(fragment)
+                    } else {
+                        let (redacted_fragment, fragment_was_redacted) =
+                            redact_pair_list(Some(fragment));
+                        match redacted_fragment {
+                            Some(redacted_fragment) => (redacted_fragment, fragment_was_redacted),
+                            None => (fragment.to_owned(), false),
+                        }
                     }
                 }
             };
@@ -151,6 +155,10 @@ fn redact_fragment(fragment: Option<&str>) -> (Option<String>, bool) {
         }
         None => (None, false),
     }
+}
+
+fn is_hash_router_route(fragment: &str) -> bool {
+    fragment.starts_with('/')
 }
 
 fn redact_fragment_route(route: &str) -> (String, bool) {

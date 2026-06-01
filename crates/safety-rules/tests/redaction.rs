@@ -446,6 +446,26 @@ fn redacts_hash_router_route_secret_values_before_query() {
 }
 
 #[test]
+fn redacts_hash_router_route_secret_assignments_without_query() {
+    for (raw_url, expected) in [
+        (
+            "https://example.test/#/callback/access_token=FRAGSECRET",
+            "https://example.test/#[REDACTED]",
+        ),
+        (
+            "https://example.test/#/callback/clientSecret=FRAGSECRET",
+            "https://example.test/#[REDACTED]",
+        ),
+    ] {
+        let result = redact_secret_bearing_url(raw_url);
+
+        assert!(result.was_masked);
+        assert_eq!(result.text, expected);
+        assert!(!result.text.contains("FRAGSECRET"));
+    }
+}
+
+#[test]
 fn preserves_non_secret_url_parts() {
     for raw_url in [
         "https://example.test/search?q=release-notes&redirect=https%3A%2F%2Fdocs.example.test%2Fpage%3Fsection%3Dintro#view=summary",
