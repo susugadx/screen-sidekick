@@ -1,0 +1,9 @@
+/target/
+**/*.rs.bk
+
+node_modules/
+/dist/
+/build/
+
+apps/desktop/src-tauri/target/
+apps/desktop/ui/dist/

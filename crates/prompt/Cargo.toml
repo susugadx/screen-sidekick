@@ -1,0 +1,10 @@
+[package]
+name = "screen-sidekick-prompt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+screen-sidekick-screen-context.workspace = true
+screen-sidekick-safety.workspace = true

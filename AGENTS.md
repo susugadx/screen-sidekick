@@ -112,6 +112,48 @@ cookies、localStorage、sessionStorage、hidden input values、password values�
 
 input values はデフォルトで mask する。
 
+## Sanitization boundary
+
+`SafetyReview` / sanitized context は、prompt preview、handoff package、logs、UI preview に出るすべての user/page-originated field を対象にする。
+
+raw capture / adapter 由来の context は `RawScreenContext` / `ScreenContext v0.1` として扱い、prompt / handoff 生成では `crates/safety` が生成した `SanitizedScreenContext` だけを読む。
+
+特に以下は prompt / handoff 出力前に `crates/safety` を通す:
+
+* page URL の path / query / fragment
+* selected text
+* input values
+* button / input labels
+* title / aria-label / placeholder
+* 将来追加する browser / page metadata
+
+URL は origin と non-secret path を可能な限り残し、secret-like path segment / query / fragment value を `[REDACTED]` にする。
+
+prompt crate、UI、adapter に場当たり的な redaction / masking を追加してはならない。出力直前の caller ではなく、`crates/safety` が sanitized context の source of truth である。
+
+## Output sink sanitization audit
+
+prompt preview、handoff JSON、logs、UI preview に出力する field を追加・変更する場合は、出力側の code path から逆算して、各 emitted field が `crates/safety` の sanitization を通っていることを確認する。
+
+field list を人間が思い出して列挙するだけで完了扱いしない。`prompt` / `handoff` / `UI` が実際に出力している field を source of truth として確認する。
+
+prompt 出力では page / user-originated field を raw interpolation せず、改行や prompt-like text が top-level line を作れない形に quote / escape する。
+
+secret redaction のテストでは、少なくとも以下を含める:
+
+* secret-bearing key: `token=...`, `access_token=...`, `api_key=...`
+* secret label + value: `password swordfish`, `api key livevalue`
+* URL path token: `/reset/sk-...`
+* benign key + secret-like value: `q=sk-...`
+* encoded / nested value: `redirect=https%3A...access_token%3D...`
+* page title
+* button text / aria-label / title
+* input name / label / aria-label / title / placeholder
+* selected text
+* input value
+
+最終 output sink 経由で raw secret value が含まれないことを確認する。
+
 ## DOM 抽出方針
 
 現在の画面を説明するのに有用な情報だけを抽出する:
@@ -170,6 +212,7 @@ serialization / deserialization は明示的に実装し、テストする。
 * ScreenContext schema behavior
 * danger detection
 * secret masking
+* prompt / handoff 経由で raw secret value が漏れないこと
 * prompt generation
 * handoff package generation
 

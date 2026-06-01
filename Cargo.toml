@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/screen-context",
+  "crates/safety-rules",
+  "crates/safety",
+  "crates/prompt",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+version = "0.0.0"
+
+[workspace.dependencies]
+screen-sidekick-screen-context = { path = "crates/screen-context" }
+screen-sidekick-safety-rules = { path = "crates/safety-rules" }
+screen-sidekick-safety = { path = "crates/safety" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
