@@ -67,6 +67,24 @@ test("excludes nested textarea contents from captured labels", () => {
   assert.equal(JSON.stringify(capture).includes("private note"), false);
 });
 
+test("excludes nested contenteditable contents from captured labels", () => {
+  installDom(`
+    <form>
+      <label>
+        Notes
+        <div contenteditable="plaintext-only">private note</div>
+        <input name="title" />
+      </label>
+    </form>
+  `);
+
+  const capture = collectBrowserContext();
+  const labeledInput = capture.inputs.find((input) => input.name === "title");
+
+  assert.equal(labeledInput?.label, "Notes");
+  assert.equal(JSON.stringify(capture).includes("private note"), false);
+});
+
 test("captures only controls that intersect the viewport", () => {
   installDom(`
     <section>

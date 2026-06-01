@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const SCREEN_CONTEXT_SCHEMA_VERSION: &str = "0.1";
@@ -66,13 +67,21 @@ pub struct RawPageMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawScreenshotMetadata {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_screenshot_format",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub format: Option<ScreenshotFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_captured_at",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub captured_at: Option<CapturedAt>,
 }
 
@@ -142,6 +151,35 @@ impl<'de> Deserialize<'de> for CapturedAt {
         Self::parse_extension_iso_millis_utc(value)
             .ok_or_else(|| serde::de::Error::custom("invalid captured_at timestamp"))
     }
+}
+
+fn deserialize_optional_screenshot_format<'de, D>(
+    deserializer: D,
+) -> Result<Option<ScreenshotFormat>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<StringMetadata>::deserialize(deserializer)? {
+        Some(StringMetadata::Text(value)) => Ok(ScreenshotFormat::parse(&value)),
+        Some(StringMetadata::Ignored(_)) | None => Ok(None),
+    }
+}
+
+fn deserialize_optional_captured_at<'de, D>(deserializer: D) -> Result<Option<CapturedAt>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<StringMetadata>::deserialize(deserializer)? {
+        Some(StringMetadata::Text(value)) => Ok(CapturedAt::parse_extension_iso_millis_utc(value)),
+        Some(StringMetadata::Ignored(_)) | None => Ok(None),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringMetadata {
+    Text(String),
+    Ignored(IgnoredAny),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

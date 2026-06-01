@@ -15,6 +15,12 @@ import {
   type SafetySummary,
   type SafetyWarning,
 } from "./capture_contract.js";
+import {
+  REOPEN_SIDEKICK_FOR_TAB_MESSAGE,
+  assertFreshCaptureGrant,
+  createCaptureGrant,
+  type CaptureGrant,
+} from "./capture_permission.js";
 import { collectBrowserContext } from "./dom_capture.js";
 import { clearPreviewState, setPreviewState } from "./preview_state.js";
 
@@ -31,6 +37,9 @@ const STATIC_BRIDGE_REJECTION_MESSAGES = new Set([
   "capture request is invalid",
   "failed to serialize capture response",
 ]);
+
+let initialCaptureGrant: CaptureGrant | null = null;
+let initialCaptureGrantError: Error | null = null;
 
 const elements = {
   bridgeForm: requireElement("bridge-form", HTMLFormElement),
@@ -54,6 +63,7 @@ async function initialize(): Promise<void> {
     elements.bridgeUrl.value = settings.url;
     elements.bridgeToken.value = settings.token;
   }
+  await initializeCaptureGrant();
 
   elements.bridgeForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -104,11 +114,13 @@ async function captureToBridge(): Promise<void> {
 
 async function captureActiveTabContext(): Promise<RawBrowserContext> {
   const tab = await getActiveTab();
-  if (typeof tab.id !== "number") {
-    throw new Error("Active tab is unavailable");
+  if (!initialCaptureGrant) {
+    throw initialCaptureGrantError ?? new Error(REOPEN_SIDEKICK_FOR_TAB_MESSAGE);
   }
+  const captureGrant = initialCaptureGrant;
+  assertFreshCaptureGrant(tab, captureGrant);
 
-  const domCapture = await captureDom(tab.id);
+  const domCapture = await captureDom(captureGrant.tabId);
   const screenshot = await captureScreenshotMetadata(tab.windowId);
   const context: RawBrowserContext = {
     schema_version: RAW_BROWSER_CONTEXT_SCHEMA_VERSION,
@@ -128,6 +140,17 @@ async function captureActiveTabContext(): Promise<RawBrowserContext> {
   }
 
   return context;
+}
+
+async function initializeCaptureGrant(): Promise<void> {
+  try {
+    initialCaptureGrant = createCaptureGrant(await getActiveTab());
+    initialCaptureGrantError = null;
+  } catch (error) {
+    initialCaptureGrant = null;
+    initialCaptureGrantError =
+      error instanceof Error ? error : new Error(REOPEN_SIDEKICK_FOR_TAB_MESSAGE);
+  }
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab> {

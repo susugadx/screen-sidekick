@@ -241,7 +241,7 @@ export function collectBrowserContext(): DomCapture {
     if (!(clone instanceof HTMLElement)) {
       return undefined;
     }
-    clone.querySelectorAll("button,input,select,textarea").forEach((control) => {
+    clone.querySelectorAll("button,input,select,textarea,[contenteditable]").forEach((control) => {
       control.remove();
     });
     return cleanText(clone.textContent);
