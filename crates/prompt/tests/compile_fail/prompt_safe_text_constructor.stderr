@@ -1,0 +1,53 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/compile_fail/prompt_safe_text_constructor.rs:4:17
+  |
+4 |     let _text = PromptSafeText("secret".to_owned());
+  |                 ^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> $WORKSPACE/crates/safety/src/lib.rs
+  |
+  | pub struct PromptSafeText(String);
+  |                           ^^^^^^ private field
+help: you might have meant to use the `new_unchecked` associated function
+  |
+4 |     let _text = PromptSafeText::new_unchecked("secret".to_owned());
+  |                               +++++++++++++++
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/compile_fail/prompt_safe_text_constructor.rs:5:16
+  |
+5 |     let _url = SanitizedUrl("https://example.test/?token=secret".to_owned());
+  |                ^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> $WORKSPACE/crates/safety/src/lib.rs
+  |
+  | pub struct SanitizedUrl(String);
+  |                         ^^^^^^ private field
+help: you might have meant to use the `new_unchecked` associated function
+  |
+5 |     let _url = SanitizedUrl::new_unchecked("https://example.test/?token=secret".to_owned());
+  |                            +++++++++++++++
+
+error[E0624]: associated function `new_unchecked` is private
+ --> tests/compile_fail/prompt_safe_text_constructor.rs:6:33
+  |
+6 |     let _text = PromptSafeText::new_unchecked("secret".to_owned());
+  |                                 ^^^^^^^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/safety/src/lib.rs
+  |
+  |     fn new_unchecked(value: String) -> Self {
+  |     --------------------------------------- private associated function defined here
+
+error[E0624]: associated function `new_unchecked` is private
+ --> tests/compile_fail/prompt_safe_text_constructor.rs:7:30
+  |
+7 |     let _url = SanitizedUrl::new_unchecked("https://example.test/?token=secret".to_owned());
+  |                              ^^^^^^^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/safety/src/lib.rs
+  |
+  |     fn new_unchecked(value: String) -> Self {
+  |     --------------------------------------- private associated function defined here

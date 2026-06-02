@@ -1,0 +1,31 @@
+[package]
+name = "screen-sidekick-desktop"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.96"
+publish = false
+
+[features]
+default = ["tauri-app"]
+tauri-app = ["dep:tauri"]
+
+[lib]
+name = "screen_sidekick_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+screen-sidekick-capture-pipeline = { path = "../../../crates/capture-pipeline" }
+axum = "0.8.9"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.11.2", features = [], optional = true }
+tokio = { version = "1.52.3", features = ["net", "rt", "sync"] }
+url = "2"
+uuid = { version = "1.23.2", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt", "sync"] }
+tower = { version = "0.5.3", features = ["util"] }

@@ -6,5 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-screen-sidekick-screen-context.workspace = true
 screen-sidekick-safety.workspace = true
+
+[dev-dependencies]
+screen-sidekick-screen-context.workspace = true
+trybuild = "1"

@@ -5,6 +5,11 @@ members = [
   "crates/safety-rules",
   "crates/safety",
   "crates/prompt",
+  "crates/capture-pipeline",
+]
+exclude = [
+  "apps/desktop/src-tauri",
+  "apps/desktop/ui",
 ]
 
 [workspace.package]
@@ -16,6 +21,8 @@ version = "0.0.0"
 screen-sidekick-screen-context = { path = "crates/screen-context" }
 screen-sidekick-safety-rules = { path = "crates/safety-rules" }
 screen-sidekick-safety = { path = "crates/safety" }
+screen-sidekick-prompt = { path = "crates/prompt" }
+screen-sidekick-capture-pipeline = { path = "crates/capture-pipeline" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

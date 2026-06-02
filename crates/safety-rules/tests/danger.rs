@@ -1,13 +1,13 @@
 use screen_sidekick_safety_rules::{detect_danger, DangerCategory, DangerFinding, DangerSource};
-use screen_sidekick_screen_context::{Button, Input, PageMetadata, ScreenContext};
+use screen_sidekick_screen_context::{RawButton, RawInput, RawPageMetadata, RawScreenContext};
 
 #[test]
 fn detects_visible_button_danger() {
-    let mut context = ScreenContext::new();
-    context.buttons = Some(vec![Button {
+    let mut context = RawScreenContext::new();
+    context.buttons = Some(vec![RawButton {
         text: Some("Delete account".to_owned()),
         visible: Some(true),
-        ..Button::default()
+        ..RawButton::default()
     }]);
 
     let findings = detect_danger(&context);
@@ -24,16 +24,16 @@ fn detects_visible_button_danger() {
 
 #[test]
 fn ignores_invisible_controls() {
-    let mut context = ScreenContext::new();
-    context.buttons = Some(vec![Button {
+    let mut context = RawScreenContext::new();
+    context.buttons = Some(vec![RawButton {
         text: Some("Delete account".to_owned()),
         visible: Some(false),
-        ..Button::default()
+        ..RawButton::default()
     }]);
-    context.inputs = Some(vec![Input {
+    context.inputs = Some(vec![RawInput {
         label: Some("Reset password".to_owned()),
         visible: Some(false),
-        ..Input::default()
+        ..RawInput::default()
     }]);
 
     let findings = detect_danger(&context);
@@ -43,16 +43,16 @@ fn ignores_invisible_controls() {
 
 #[test]
 fn detects_page_selected_text_and_input_label_sources() {
-    let mut context = ScreenContext::new();
-    context.page = Some(PageMetadata {
+    let mut context = RawScreenContext::new();
+    context.page = Some(RawPageMetadata {
         title: Some("Billing settings".to_owned()),
         url: None,
     });
     context.selected_text = Some("Submit invoice".to_owned());
-    context.inputs = Some(vec![Input {
+    context.inputs = Some(vec![RawInput {
         placeholder: Some("Owner email".to_owned()),
         visible: Some(true),
-        ..Input::default()
+        ..RawInput::default()
     }]);
 
     let findings = detect_danger(&context);
@@ -71,16 +71,16 @@ fn detects_page_selected_text_and_input_label_sources() {
 
 #[test]
 fn detects_api_key_identifier_variants() {
-    let mut context = ScreenContext::new();
-    context.buttons = Some(vec![Button {
+    let mut context = RawScreenContext::new();
+    context.buttons = Some(vec![RawButton {
         text: Some("Rotate apiKey".to_owned()),
         visible: Some(true),
-        ..Button::default()
+        ..RawButton::default()
     }]);
-    context.inputs = Some(vec![Input {
+    context.inputs = Some(vec![RawInput {
         name: Some("api_key".to_owned()),
         visible: Some(true),
-        ..Input::default()
+        ..RawInput::default()
     }]);
 
     let findings = detect_danger(&context);

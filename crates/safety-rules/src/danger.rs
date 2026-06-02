@@ -1,4 +1,4 @@
-use screen_sidekick_screen_context::{Button, Input, PageMetadata, RawScreenContext};
+use screen_sidekick_screen_context::{RawButton, RawInput, RawPageMetadata, RawScreenContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DangerFinding {
@@ -80,13 +80,13 @@ pub fn detect_danger(context: &RawScreenContext) -> Vec<DangerFinding> {
     findings
 }
 
-fn scan_page(page: &PageMetadata, findings: &mut Vec<DangerFinding>) {
+fn scan_page(page: &RawPageMetadata, findings: &mut Vec<DangerFinding>) {
     if let Some(title) = page.title.as_deref() {
         scan_text(DangerSource::PageTitle, title, findings);
     }
 }
 
-fn scan_button(button: &Button, findings: &mut Vec<DangerFinding>) {
+fn scan_button(button: &RawButton, findings: &mut Vec<DangerFinding>) {
     for text in [
         button.text.as_deref(),
         button.aria_label.as_deref(),
@@ -99,7 +99,7 @@ fn scan_button(button: &Button, findings: &mut Vec<DangerFinding>) {
     }
 }
 
-fn scan_input(input: &Input, findings: &mut Vec<DangerFinding>) {
+fn scan_input(input: &RawInput, findings: &mut Vec<DangerFinding>) {
     for text in [
         input.label.as_deref(),
         input.aria_label.as_deref(),

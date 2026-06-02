@@ -1,6 +1,6 @@
 RUST_TOOLCHAIN := 1.96.0
 
-.PHONY: doctor setup fmt fmt-check clippy test check extension-manifest-check
+.PHONY: doctor setup fmt fmt-check clippy test check extension-typecheck extension-build extension-test extension-manifest-check desktop-bridge-test desktop-check desktop-ui-check
 
 doctor:
 	@command -v rustup >/dev/null || { echo "rustup not found. Install Rust from https://rustup.rs/"; exit 1; }
@@ -9,7 +9,8 @@ doctor:
 	@rustc --version
 	@rustfmt --version
 	@cargo clippy --version
-	@command -v node >/dev/null && node --version || echo "node not found; extension checks are limited in Phase 0-A"
+	@command -v node >/dev/null && node --version || echo "node not found; extension checks are unavailable"
+	@command -v npm >/dev/null && npm --version || echo "npm not found; extension checks are unavailable"
 
 setup:
 	rustup toolchain install $(RUST_TOOLCHAIN) --profile minimal --component rustfmt --component clippy
@@ -26,7 +27,25 @@ clippy:
 test:
 	cargo test --workspace
 
+extension-typecheck:
+	npm --prefix apps/extension run typecheck
+
+extension-build:
+	npm --prefix apps/extension run build
+
+extension-test:
+	npm --prefix apps/extension test
+
 extension-manifest-check:
 	node apps/extension/check-manifest.mjs
 
-check: fmt-check clippy test extension-manifest-check
+desktop-bridge-test:
+	cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
+
+desktop-check:
+	cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+desktop-ui-check:
+	cargo check --manifest-path apps/desktop/ui/Cargo.toml --target wasm32-unknown-unknown
+
+check: fmt-check clippy test extension-typecheck extension-test extension-manifest-check desktop-bridge-test
