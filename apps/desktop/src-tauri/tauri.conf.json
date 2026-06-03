@@ -4,8 +4,15 @@
   "version": "0.0.0",
   "identifier": "dev.screen-sidekick.app",
   "build": {
-    "beforeDevCommand": "trunk serve ../ui/index.html --port 1420 --open false",
-    "beforeBuildCommand": "trunk build ../ui/index.html --release --dist ../ui/dist",
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "../ui",
+      "wait": false
+    },
+    "beforeBuildCommand": {
+      "script": "trunk build --release",
+      "cwd": "../ui"
+    },
     "devUrl": "http://localhost:1420",
     "frontendDist": "../ui/dist"
   },

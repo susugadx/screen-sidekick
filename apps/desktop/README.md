@@ -25,3 +25,28 @@ cargo check --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown
 
 The default Tauri check requires OS webview prerequisites. The UI check requires
 the `wasm32-unknown-unknown` target.
+
+## Development
+
+Run the desktop app from the repository root with:
+
+```sh
+make desktop-dev
+```
+
+The direct Tauri command is supported from the repository root when the Tauri
+config path is provided:
+
+```sh
+cargo tauri dev --config apps/desktop/src-tauri/tauri.conf.json
+```
+
+It is also supported from `apps/desktop/src-tauri` without extra arguments:
+
+```sh
+cd apps/desktop/src-tauri
+cargo tauri dev
+```
+
+The Tauri hook starts Trunk from `apps/desktop/ui`, where `Trunk.toml` and the
+Leptos `index.html` live.
