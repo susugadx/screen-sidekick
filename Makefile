@@ -1,6 +1,6 @@
 RUST_TOOLCHAIN := 1.96.0
 
-.PHONY: doctor setup fmt fmt-check clippy test check extension-typecheck extension-build extension-test extension-manifest-check desktop-bridge-test desktop-check desktop-ui-check
+.PHONY: doctor setup fmt fmt-check clippy test check extension-typecheck extension-build extension-test extension-manifest-check desktop-bridge-test desktop-check desktop-ui-check desktop-dev
 
 doctor:
 	@command -v rustup >/dev/null || { echo "rustup not found. Install Rust from https://rustup.rs/"; exit 1; }
@@ -47,5 +47,8 @@ desktop-check:
 
 desktop-ui-check:
 	cargo check --manifest-path apps/desktop/ui/Cargo.toml --target wasm32-unknown-unknown
+
+desktop-dev:
+	cd apps/desktop/src-tauri && cargo tauri dev
 
 check: fmt-check clippy test extension-typecheck extension-test extension-manifest-check desktop-bridge-test
