@@ -19,6 +19,8 @@ import {
   REOPEN_SIDEKICK_FOR_TAB_MESSAGE,
   assertFreshCaptureGrant,
   createCaptureGrant,
+  isMissingCaptureVisibleTabPermissionError,
+  isMissingManifestHostPermissionError,
   type CaptureGrant,
 } from "./capture_permission.js";
 import { collectBrowserContext } from "./dom_capture.js";
@@ -120,7 +122,7 @@ async function captureActiveTabContext(): Promise<RawBrowserContext> {
   const captureGrant = initialCaptureGrant;
   assertFreshCaptureGrant(tab, captureGrant);
 
-  const domCapture = await captureDom(captureGrant.tabId);
+  const domCapture = await captureDom(captureGrant);
   const screenshot = await captureScreenshotMetadata(tab.windowId);
   const context: RawBrowserContext = {
     schema_version: RAW_BROWSER_CONTEXT_SCHEMA_VERSION,
@@ -162,7 +164,23 @@ async function getActiveTab(): Promise<chrome.tabs.Tab> {
   return tab;
 }
 
-async function captureDom(tabId: number): Promise<DomCapture> {
+async function captureDom(grant: CaptureGrant): Promise<DomCapture> {
+  try {
+    return await executeCaptureScript(grant.tabId);
+  } catch (error) {
+    if (!isMissingManifestHostPermissionError(error)) {
+      throw error;
+    }
+  }
+
+  const granted = await requestCaptureHostPermission(grant.hostPermissionPattern);
+  if (!granted) {
+    throw new Error("Site access was not granted for this page");
+  }
+  return executeCaptureScript(grant.tabId);
+}
+
+async function executeCaptureScript(tabId: number): Promise<DomCapture> {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     func: collectBrowserContext,
@@ -175,13 +193,30 @@ async function captureDom(tabId: number): Promise<DomCapture> {
   return parsed;
 }
 
+async function requestCaptureHostPermission(origin: string): Promise<boolean> {
+  try {
+    return await chrome.permissions.request({ origins: [origin] });
+  } catch {
+    throw new Error("Site access permission request failed");
+  }
+}
+
 async function captureScreenshotMetadata(
   windowId: number | undefined,
 ): Promise<RawBrowserScreenshot | undefined> {
-  const dataUrl =
-    typeof windowId === "number"
-      ? await chrome.tabs.captureVisibleTab(windowId, { format: "png" })
-      : await chrome.tabs.captureVisibleTab({ format: "png" });
+  let dataUrl: string;
+  try {
+    dataUrl =
+      typeof windowId === "number"
+        ? await chrome.tabs.captureVisibleTab(windowId, { format: "png" })
+        : await chrome.tabs.captureVisibleTab({ format: "png" });
+  } catch (error) {
+    if (isMissingCaptureVisibleTabPermissionError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+
   const dimensions = await readImageDimensions(dataUrl);
   const format = imageFormatFromDataUrl(dataUrl);
   const screenshot: RawBrowserScreenshot = {

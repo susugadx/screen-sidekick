@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "Capture visual context for a user-reviewed Codex handoff.",
   "permissions": ["activeTab", "scripting", "sidePanel", "storage", "tabs"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "action": {
     "default_title": "Screen Sidekick"
   },

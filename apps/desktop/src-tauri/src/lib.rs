@@ -28,7 +28,7 @@ impl AppState {
 
 #[cfg(feature = "tauri-app")]
 #[tauri::command]
-pub fn get_bridge_status(state: tauri::State<'_, AppState>) -> BridgeStatus {
+fn get_bridge_status(state: tauri::State<'_, AppState>) -> BridgeStatus {
     state.bridge_status()
 }
 

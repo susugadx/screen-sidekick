@@ -20,6 +20,12 @@ for (const permission of ["activeTab", "scripting", "sidePanel", "storage", "tab
   }
 }
 
+for (const origin of ["http://*/*", "https://*/*"]) {
+  if (!manifest.optional_host_permissions?.includes(origin)) {
+    throw new Error(`missing optional host permission: ${origin}`);
+  }
+}
+
 for (const path of [
   "dist/background.js",
   "dist/side_panel.js",

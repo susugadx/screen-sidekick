@@ -7,5 +7,6 @@ node_modules/
 
 apps/extension/dist/
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
 apps/desktop/ui/dist/
 apps/desktop/ui/target/
