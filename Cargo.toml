@@ -6,6 +6,10 @@ members = [
   "crates/safety",
   "crates/prompt",
   "crates/capture-pipeline",
+  "crates/sidekick-protocol",
+  "crates/session",
+  "crates/codex-client",
+  "crates/sidekick-daemon",
 ]
 exclude = [
   "apps/desktop/src-tauri",
@@ -23,6 +27,22 @@ screen-sidekick-safety-rules = { path = "crates/safety-rules" }
 screen-sidekick-safety = { path = "crates/safety" }
 screen-sidekick-prompt = { path = "crates/prompt" }
 screen-sidekick-capture-pipeline = { path = "crates/capture-pipeline" }
+screen-sidekick-sidekick-protocol = { path = "crates/sidekick-protocol" }
+screen-sidekick-session = { path = "crates/session" }
+screen-sidekick-codex-client = { path = "crates/codex-client" }
+screen-sidekick-sidekick-daemon = { path = "crates/sidekick-daemon" }
+async-trait = "0.1"
+axum = { version = "0.8.9", features = ["ws"] }
+directories = "6"
+futures-core = "0.3"
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tokio-tungstenite = "0.29"
 url = "2"
+uuid = { version = "1.23.2", features = ["v4"] }

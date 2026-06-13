@@ -10,9 +10,10 @@ extern "C" {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct BridgeStatus {
+struct DaemonStatus {
     schema_version: String,
     url: String,
+    ws_url: String,
     token: String,
     status: String,
 }
@@ -20,7 +21,7 @@ struct BridgeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LoadState {
     Loading,
-    Ready(BridgeStatus),
+    Ready(DaemonStatus),
     Failed(String),
 }
 
@@ -34,7 +35,7 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         spawn_local(async move {
-            match load_bridge_status().await {
+            match load_daemon_status().await {
                 Ok(status) => set_state.set(LoadState::Ready(status)),
                 Err(error) => set_state.set(LoadState::Failed(error)),
             }
@@ -50,11 +51,15 @@ fn App() -> impl IntoView {
         LoadState::Failed(_) => "status error",
         LoadState::Loading | LoadState::Ready(_) => "status",
     };
-    let bridge_url = move || match state.get() {
+    let daemon_url = move || match state.get() {
         LoadState::Ready(status) => status.url,
         LoadState::Loading | LoadState::Failed(_) => String::new(),
     };
-    let bridge_token = move || match state.get() {
+    let daemon_ws_url = move || match state.get() {
+        LoadState::Ready(status) => status.ws_url,
+        LoadState::Loading | LoadState::Failed(_) => String::new(),
+    };
+    let daemon_token = move || match state.get() {
         LoadState::Ready(status) => status.token,
         LoadState::Loading | LoadState::Failed(_) => String::new(),
     };
@@ -77,26 +82,39 @@ fn App() -> impl IntoView {
                 </div>
                 <section class="panel">
                     <div class="field">
-                        <label for="bridge-url">"Bridge URL"</label>
+                        <label for="daemon-url">"Daemon URL"</label>
                         <div class="copy-row">
-                            <input id="bridge-url" readonly prop:value=bridge_url />
+                            <input id="daemon-url" readonly prop:value=daemon_url />
                             <button
                                 type="button"
                                 disabled=move || !is_ready()
-                                on:click=move |_| copy_to_clipboard(bridge_url())
+                                on:click=move |_| copy_to_clipboard(daemon_url())
                             >
                                 "Copy"
                             </button>
                         </div>
                     </div>
                     <div class="field">
-                        <label for="bridge-token">"Bearer Token"</label>
+                        <label for="daemon-ws-url">"WebSocket URL"</label>
                         <div class="copy-row">
-                            <input id="bridge-token" readonly prop:value=bridge_token />
+                            <input id="daemon-ws-url" readonly prop:value=daemon_ws_url />
                             <button
                                 type="button"
                                 disabled=move || !is_ready()
-                                on:click=move |_| copy_to_clipboard(bridge_token())
+                                on:click=move |_| copy_to_clipboard(daemon_ws_url())
+                            >
+                                "Copy"
+                            </button>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label for="daemon-token">"Pairing Token"</label>
+                        <div class="copy-row">
+                            <input id="daemon-token" readonly prop:value=daemon_token />
+                            <button
+                                type="button"
+                                disabled=move || !is_ready()
+                                on:click=move |_| copy_to_clipboard(daemon_token())
                             >
                                 "Copy"
                             </button>
@@ -115,8 +133,8 @@ fn App() -> impl IntoView {
     }
 }
 
-async fn load_bridge_status() -> Result<BridgeStatus, String> {
-    let value = invoke_tauri("get_bridge_status")
+async fn load_daemon_status() -> Result<DaemonStatus, String> {
+    let value = invoke_tauri("get_daemon_status")
         .await
         .map_err(|error| js_error_to_string(&error))?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())

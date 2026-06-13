@@ -4,7 +4,6 @@ import {
   buildInput,
   buildPage,
   serializeCaptureContextForBridge,
-  type BridgeSettings,
   type CaptureBridgeResponse,
   type DomCapture,
   type InputKind,
@@ -25,8 +24,24 @@ import {
 } from "./capture_permission.js";
 import { collectBrowserContext } from "./dom_capture.js";
 import { clearPreviewState, setPreviewState } from "./preview_state.js";
+import {
+  clearActiveChatMarker,
+  loadActiveChatMarker,
+  saveActiveChatMarker,
+  type ActiveChatMarker,
+} from "./side_panel_active_chat.js";
+import {
+  SidekickProtocolError,
+  SidekickProtocolClient,
+  type DaemonSettings,
+  type SidekickMessage,
+  type SidekickNotification,
+  type SidekickSessionSnapshot,
+  type SidekickTurn,
+} from "./sidekick_protocol.js";
 
-const STORAGE_KEY = "bridgeSettings";
+const STORAGE_KEY = "daemonSettings";
+const LEGACY_STORAGE_KEY = "bridgeSettings";
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_BRIDGE_RESPONSE_CHARS = 512 * 1024;
 const STATIC_BRIDGE_REJECTION_MESSAGES = new Set([
@@ -42,13 +57,30 @@ const STATIC_BRIDGE_REJECTION_MESSAGES = new Set([
 
 let initialCaptureGrant: CaptureGrant | null = null;
 let initialCaptureGrantError: Error | null = null;
+let protocolClient: SidekickProtocolClient | null = null;
+let unsubscribeProtocolNotifications: (() => void) | null = null;
+let activeSessionId: string | null = null;
+let activeSessionDaemonUrl: string | null = null;
+let activeSessionDaemonToken: string | null = null;
+let activeTurnId: string | null = null;
+let subscribedSessionId: string | null = null;
+let requestInFlight = false;
+let sessionRecoveryRequired = false;
+let activeAssistantText = "";
+let activeAssistantTextElement: HTMLDivElement | null = null;
+let renderedMessageIds = new Set<string>();
+let pendingSubmittedQuestion: { sessionId: string; text: string } | null = null;
 
 const elements = {
   bridgeForm: requireElement("bridge-form", HTMLFormElement),
   bridgeUrl: requireElement("bridge-url", HTMLInputElement),
   bridgeToken: requireElement("bridge-token", HTMLInputElement),
   saveBridge: requireElement("save-bridge", HTMLButtonElement),
-  capture: requireElement("capture", HTMLButtonElement),
+  messageForm: requireElement("message-form", HTMLFormElement),
+  messageInput: requireElement("message-input", HTMLTextAreaElement),
+  ask: requireElement("ask", HTMLButtonElement),
+  transcript: requireElement("transcript", HTMLDivElement),
+  debugCapture: requireElement("debug-capture", HTMLButtonElement),
   copyJson: requireElement("copy-json", HTMLButtonElement),
   copyPrompt: requireElement("copy-prompt", HTMLButtonElement),
   screenContextJson: requireElement("screen-context-json", HTMLTextAreaElement),
@@ -60,7 +92,7 @@ const elements = {
 void initialize();
 
 async function initialize(): Promise<void> {
-  const settings = await loadBridgeSettings();
+  const settings = await loadDaemonSettings();
   if (settings) {
     elements.bridgeUrl.value = settings.url;
     elements.bridgeToken.value = settings.token;
@@ -69,10 +101,14 @@ async function initialize(): Promise<void> {
 
   elements.bridgeForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void saveBridgeSettings();
+    void saveDaemonSettings();
   });
-  elements.capture.addEventListener("click", () => {
-    void captureToBridge();
+  elements.messageForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void askCodex();
+  });
+  elements.debugCapture.addEventListener("click", () => {
+    void captureDebugToBridge();
   });
   elements.copyJson.addEventListener("click", () => {
     void navigator.clipboard.writeText(elements.screenContextJson.value);
@@ -82,22 +118,74 @@ async function initialize(): Promise<void> {
   });
 
   clearPreviewState(elements);
+  updateControlsDisabled();
   setStatus("Idle");
+  if (settings) {
+    await recoverActiveChatFromStorage(settings);
+  }
 }
 
-async function saveBridgeSettings(): Promise<void> {
-  const settings = readBridgeSettingsFromInputs();
+async function saveDaemonSettings(): Promise<void> {
+  const settings = readDaemonSettingsFromInputs();
   await chrome.storage.session.set({ [STORAGE_KEY]: settings });
+  await chrome.storage.session.remove(LEGACY_STORAGE_KEY);
+  if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
+    clearActiveChatState();
+    await clearActiveChatMarker();
+  }
   setStatus("Saved");
 }
 
-async function captureToBridge(): Promise<void> {
-  setBusy(true);
+async function askCodex(): Promise<void> {
+  const question = elements.messageInput.value.trim();
+  if (!question) {
+    setError("Question is required");
+    return;
+  }
+
+  setRequestInFlight(true);
+  setStatus("Capturing");
+
+  try {
+    const settings = readDaemonSettingsFromInputs();
+    const client = await ensureProtocolClient(settings);
+    const sessionId = await ensureActiveSession(client, settings);
+    const context = await captureActiveTabContext();
+    const attachment = await client.attachBrowserContext(sessionId, context, "message_send");
+    pendingSubmittedQuestion = { sessionId, text: question };
+    const sendResult = await client.sendMessage(sessionId, question, [attachment.id], "ask_only");
+    setActiveTurnId(sendResult.turnId);
+    appendSessionMessage({
+      id: sendResult.messageId,
+      sessionId,
+      role: "user",
+      text: question,
+      status: "pending",
+      turnId: sendResult.turnId,
+    });
+    activeAssistantText = "";
+    activeAssistantTextElement = appendTranscriptMessage("assistant", "");
+    setStatus(attachment.safetyStatus === "warning" ? "Review" : "Asking");
+  } catch (error) {
+    if (sessionRecoveryRequired) {
+      setStatus("Reconnecting to daemon");
+    } else {
+      activeAssistantTextElement = null;
+      activeAssistantText = "";
+      setError(error instanceof Error ? error.message : "Ask failed");
+    }
+  } finally {
+    setRequestInFlight(false);
+  }
+}
+
+async function captureDebugToBridge(): Promise<void> {
+  setRequestInFlight(true);
   clearPreviewState(elements);
   setStatus("Capturing");
 
   try {
-    const settings = readBridgeSettingsFromInputs();
+    const settings = readDaemonSettingsFromInputs();
     const endpoint = buildCaptureEndpoint(settings.url);
     const context = await captureActiveTabContext();
     const response = await postCapture(endpoint, settings.token, context);
@@ -110,8 +198,322 @@ async function captureToBridge(): Promise<void> {
   } catch (error) {
     setError(error instanceof Error ? error.message : "Capture failed");
   } finally {
-    setBusy(false);
+    setRequestInFlight(false);
   }
+}
+
+async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickProtocolClient> {
+  if (protocolClient?.matches(settings)) {
+    return protocolClient;
+  }
+
+  const settingsChanged =
+    hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings);
+  unsubscribeProtocolNotifications?.();
+  unsubscribeProtocolNotifications = null;
+  protocolClient?.close();
+  protocolClient = null;
+  subscribedSessionId = null;
+  if (settingsChanged) {
+    clearActiveChatState();
+    void clearActiveChatMarker();
+  }
+
+  const version = chrome.runtime.getManifest().version;
+  const client = await SidekickProtocolClient.connect(settings, version);
+  unsubscribeProtocolNotifications = client.onNotification(handleSidekickNotification);
+  protocolClient = client;
+  return client;
+}
+
+async function ensureActiveSession(
+  client: SidekickProtocolClient,
+  settings: DaemonSettings,
+): Promise<string> {
+  if (activeSessionId) {
+    if (subscribedSessionId !== activeSessionId) {
+      await client.subscribeSession(activeSessionId);
+      subscribedSessionId = activeSessionId;
+    }
+    return activeSessionId;
+  }
+
+  const session = await client.createSession("Screen Sidekick");
+  await client.subscribeSession(session.id);
+  activeSessionId = session.id;
+  activeSessionDaemonUrl = settings.url;
+  activeSessionDaemonToken = settings.token;
+  subscribedSessionId = session.id;
+  void persistActiveChatMarker();
+  return session.id;
+}
+
+function handleSidekickNotification(notification: SidekickNotification): void {
+  switch (notification.kind) {
+    case "turn_delta":
+      if (notification.turnId === activeTurnId && activeAssistantTextElement) {
+        activeAssistantText += notification.delta;
+        activeAssistantTextElement.textContent = activeAssistantText;
+        scrollTranscriptToEnd();
+      }
+      return;
+    case "turn_completed":
+      if (notification.turn.id === activeTurnId) {
+        clearActiveTurn();
+        setStatus("Ready");
+      }
+      return;
+    case "turn_failed":
+      if (!notification.turn || notification.turn.id === activeTurnId) {
+        clearActiveTurn(true);
+        setError(notification.message ?? "Codex turn failed");
+      }
+      return;
+    case "turn_cancelled":
+      if (notification.turn.id === activeTurnId) {
+        clearActiveTurn(true);
+        setStatus("Cancelled");
+      }
+      return;
+    case "message_created":
+      if (notification.sessionId === activeSessionId) {
+        appendSessionMessage(notification.message);
+      }
+      return;
+    case "error":
+      setError(notification.error.message);
+      return;
+    case "connection_lost":
+      handleProtocolConnectionLost(notification.message);
+      return;
+    case "ignored":
+      return;
+  }
+}
+
+function clearActiveTurn(removeEmptyAssistantPlaceholder = false): void {
+  if (
+    removeEmptyAssistantPlaceholder &&
+    activeAssistantTextElement &&
+    activeAssistantText.length === 0
+  ) {
+    activeAssistantTextElement.closest(".message")?.remove();
+  }
+  setActiveTurnId(null);
+  activeAssistantTextElement = null;
+  activeAssistantText = "";
+}
+
+function handleProtocolConnectionLost(message: string): void {
+  const lostClient = protocolClient;
+  unsubscribeProtocolNotifications?.();
+  unsubscribeProtocolNotifications = null;
+  protocolClient = null;
+  subscribedSessionId = null;
+  lostClient?.close();
+  if (shouldRecoverActiveSessionOnConnectionLoss()) {
+    setSessionRecoveryRequired(true);
+    setStatus("Reconnecting to daemon");
+    void recoverActiveSessionAfterConnectionLoss(message);
+    return;
+  }
+  setError(message);
+}
+
+async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<void> {
+  const marker = await loadActiveChatMarker(settings);
+  if (!marker) {
+    return;
+  }
+
+  activeSessionId = marker.sessionId;
+  activeSessionDaemonUrl = marker.daemonUrl;
+  activeSessionDaemonToken = marker.daemonToken;
+  if (marker.activeTurnId) {
+    setActiveTurnId(marker.activeTurnId);
+    setStatus("Reconnecting to daemon");
+  } else {
+    setStatus("Restoring session");
+  }
+
+  try {
+    const client = await ensureProtocolClient(settings);
+    await recoverSessionSnapshot(client, settings, marker.sessionId);
+  } catch (error) {
+    handleSessionRecoveryError(error, "Session recovery failed");
+  }
+}
+
+async function recoverActiveSessionAfterConnectionLoss(fallbackMessage: string): Promise<void> {
+  const sessionId = activeSessionId;
+  if (!sessionId) {
+    return;
+  }
+
+  try {
+    const settings = readDaemonSettingsFromInputs();
+    const client = await ensureProtocolClient(settings);
+    await recoverSessionSnapshot(client, settings, sessionId);
+  } catch (error) {
+    handleSessionRecoveryError(error, fallbackMessage);
+  }
+}
+
+async function recoverSessionSnapshot(
+  client: SidekickProtocolClient,
+  settings: DaemonSettings,
+  sessionId: string,
+): Promise<void> {
+  await client.subscribeSession(sessionId);
+  subscribedSessionId = sessionId;
+  const snapshot = await client.getSession(sessionId);
+  activeSessionId = snapshot.session.id;
+  activeSessionDaemonUrl = settings.url;
+  activeSessionDaemonToken = settings.token;
+  renderSessionSnapshot(snapshot);
+  setSessionRecoveryRequired(false);
+  void persistActiveChatMarker();
+}
+
+function renderSessionSnapshot(snapshot: SidekickSessionSnapshot): void {
+  elements.transcript.replaceChildren();
+  renderedMessageIds = new Set();
+  activeAssistantText = "";
+  activeAssistantTextElement = null;
+
+  for (const message of snapshot.messages) {
+    appendSessionMessage(message, snapshot.activeTurn);
+  }
+
+  if (snapshot.activeTurn && isActiveTurnStatus(snapshot.activeTurn.status)) {
+    setActiveTurnId(snapshot.activeTurn.id);
+    if (!activeAssistantTextElement) {
+      activeAssistantText = "";
+      activeAssistantTextElement = appendTranscriptMessage("assistant", "");
+    }
+    setStatus("Asking");
+    return;
+  }
+
+  clearActiveTurn();
+  setStatus("Ready");
+}
+
+function appendSessionMessage(message: SidekickMessage, activeTurn?: SidekickTurn): void {
+  if (renderedMessageIds.has(message.id)) {
+    return;
+  }
+  renderedMessageIds.add(message.id);
+
+  if (message.role === "user") {
+    clearPendingSubmittedQuestionIfPersisted(message);
+    appendTranscriptMessage("user", message.text);
+    return;
+  }
+  if (message.role !== "assistant") {
+    return;
+  }
+
+  const belongsToActiveTurn =
+    (activeTurn && message.turnId === activeTurn.id && isActiveTurnStatus(activeTurn.status)) ||
+    (!activeTurn && message.turnId === activeTurnId);
+  if (belongsToActiveTurn && activeAssistantTextElement) {
+    activeAssistantText = message.text;
+    activeAssistantTextElement.textContent = activeAssistantText;
+    scrollTranscriptToEnd();
+    return;
+  }
+
+  const body = appendTranscriptMessage("assistant", message.text);
+  if (belongsToActiveTurn) {
+    activeAssistantText = message.text;
+    activeAssistantTextElement = body;
+  }
+}
+
+function isActiveTurnStatus(status: SidekickTurn["status"]): boolean {
+  return status === "pending" || status === "running";
+}
+
+function clearPendingSubmittedQuestionIfPersisted(message: SidekickMessage): void {
+  if (
+    pendingSubmittedQuestion &&
+    message.sessionId === pendingSubmittedQuestion.sessionId &&
+    message.text === pendingSubmittedQuestion.text
+  ) {
+    const submittedText = pendingSubmittedQuestion.text;
+    pendingSubmittedQuestion = null;
+    if (elements.messageInput.value.trim() === submittedText) {
+      elements.messageInput.value = "";
+    }
+  }
+}
+
+function handleSessionRecoveryError(error: unknown, fallbackMessage: string): void {
+  if (error instanceof SidekickProtocolError && error.code === "session_not_found") {
+    clearActiveChatState();
+    void clearActiveChatMarker();
+    setError("Daemon session was not found");
+    return;
+  }
+  clearRecoveryBlockingState();
+  setError(error instanceof Error ? error.message : fallbackMessage);
+}
+
+function clearActiveChatState(): void {
+  activeSessionId = null;
+  activeSessionDaemonUrl = null;
+  activeSessionDaemonToken = null;
+  subscribedSessionId = null;
+  pendingSubmittedQuestion = null;
+  clearRecoveryBlockingState();
+  clearTranscript();
+}
+
+function hasActiveDaemonIdentity(): boolean {
+  return activeSessionDaemonUrl !== null || activeSessionDaemonToken !== null;
+}
+
+function activeDaemonIdentityMatches(settings: DaemonSettings): boolean {
+  return activeSessionDaemonUrl === settings.url && activeSessionDaemonToken === settings.token;
+}
+
+function shouldRecoverActiveSessionOnConnectionLoss(): boolean {
+  return activeSessionId !== null && (activeTurnId !== null || requestInFlight);
+}
+
+function clearRecoveryBlockingState(): void {
+  setSessionRecoveryRequired(false);
+  clearActiveTurn(true);
+}
+
+function clearTranscript(): void {
+  elements.transcript.replaceChildren();
+  renderedMessageIds = new Set();
+  activeAssistantTextElement = null;
+  activeAssistantText = "";
+}
+
+function appendTranscriptMessage(role: "user" | "assistant", text: string): HTMLDivElement {
+  const item = document.createElement("div");
+  item.className = `message ${role}`;
+
+  const label = document.createElement("div");
+  label.className = "message-label";
+  label.textContent = role === "user" ? "You" : "Codex";
+
+  const body = document.createElement("div");
+  body.className = "message-text";
+  body.textContent = text;
+
+  item.append(label, body);
+  elements.transcript.append(item);
+  scrollTranscriptToEnd();
+  return body;
+}
+
+function scrollTranscriptToEnd(): void {
+  elements.transcript.scrollTop = elements.transcript.scrollHeight;
 }
 
 async function captureActiveTabContext(): Promise<RawBrowserContext> {
@@ -279,17 +681,17 @@ async function postCapture(
     const text = await response.text();
 
     if (text.length > MAX_BRIDGE_RESPONSE_CHARS) {
-      throw new Error("Bridge response is too large");
+      throw new Error("Daemon response is too large");
     }
 
     if (!response.ok) {
-      throw new Error(formatBridgeRejectionStatus(response.status, text));
+      throw new Error(formatDaemonRejectionStatus(response.status, text));
     }
 
     const payload: unknown = JSON.parse(text);
     const parsed = parseCaptureBridgeResponse(payload);
     if (!parsed) {
-      throw new Error("Bridge response shape is invalid");
+      throw new Error("Daemon response shape is invalid");
     }
     return parsed;
   } finally {
@@ -297,53 +699,72 @@ async function postCapture(
   }
 }
 
-function formatBridgeRejectionStatus(status: number, body: string): string {
+function formatDaemonRejectionStatus(status: number, body: string): string {
   const trimmedBody = body.trim();
   if (STATIC_BRIDGE_REJECTION_MESSAGES.has(trimmedBody)) {
-    return `Bridge rejected capture (${status}): ${trimmedBody}`;
+    return `Daemon rejected capture (${status}): ${trimmedBody}`;
   }
-  return `Bridge rejected capture (${status})`;
+  return `Daemon rejected capture (${status})`;
 }
 
-function buildCaptureEndpoint(rawBridgeUrl: string): URL {
-  let bridgeUrl: URL;
+function buildCaptureEndpoint(rawDaemonUrl: string): URL {
+  let daemonUrl: URL;
   try {
-    bridgeUrl = new URL(rawBridgeUrl);
+    daemonUrl = new URL(rawDaemonUrl);
   } catch {
-    throw new Error("Bridge URL is invalid");
+    throw new Error("Daemon URL is invalid");
   }
 
   if (
-    bridgeUrl.protocol !== "http:" ||
-    bridgeUrl.hostname !== "127.0.0.1" ||
-    bridgeUrl.port.length === 0
+    daemonUrl.protocol !== "http:" ||
+    daemonUrl.hostname !== "127.0.0.1" ||
+    daemonUrl.port.length === 0
   ) {
-    throw new Error("Bridge URL must use http://127.0.0.1:<port>");
+    throw new Error("Daemon URL must use http://127.0.0.1:<port>");
   }
 
-  bridgeUrl.pathname = "/v0/capture";
-  bridgeUrl.search = "";
-  bridgeUrl.hash = "";
-  return bridgeUrl;
+  daemonUrl.pathname = "/v0/capture";
+  daemonUrl.search = "";
+  daemonUrl.hash = "";
+  return daemonUrl;
 }
 
-async function loadBridgeSettings(): Promise<BridgeSettings | null> {
-  const stored: Record<string, unknown> = await chrome.storage.session.get(STORAGE_KEY);
-  return parseBridgeSettings(stored[STORAGE_KEY]);
+async function loadDaemonSettings(): Promise<DaemonSettings | null> {
+  const stored: Record<string, unknown> = await chrome.storage.session.get([
+    STORAGE_KEY,
+    LEGACY_STORAGE_KEY,
+  ]);
+  return parseDaemonSettings(stored[STORAGE_KEY]) ?? parseDaemonSettings(stored[LEGACY_STORAGE_KEY]);
 }
 
-function readBridgeSettingsFromInputs(): BridgeSettings {
-  const settings = parseBridgeSettings({
+async function persistActiveChatMarker(): Promise<void> {
+  if (!activeSessionId || !activeSessionDaemonUrl || !activeSessionDaemonToken) {
+    await clearActiveChatMarker();
+    return;
+  }
+  const marker: ActiveChatMarker = {
+    daemonUrl: activeSessionDaemonUrl,
+    daemonToken: activeSessionDaemonToken,
+    sessionId: activeSessionId,
+  };
+  if (activeTurnId) {
+    marker.activeTurnId = activeTurnId;
+  }
+  await saveActiveChatMarker(marker);
+}
+
+function readDaemonSettingsFromInputs(): DaemonSettings {
+  const settings = parseDaemonSettings({
     url: elements.bridgeUrl.value.trim(),
     token: elements.bridgeToken.value.trim(),
   });
   if (!settings) {
-    throw new Error("Bridge URL and token are required");
+    throw new Error("Daemon URL and pairing token are required");
   }
   return settings;
 }
 
-function parseBridgeSettings(value: unknown): BridgeSettings | null {
+function parseDaemonSettings(value: unknown): DaemonSettings | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -549,9 +970,28 @@ function formatSafetySummary(safety: SafetySummary): string {
   ].join("\n");
 }
 
-function setBusy(isBusy: boolean): void {
-  elements.capture.disabled = isBusy;
-  elements.saveBridge.disabled = isBusy;
+function setRequestInFlight(isBusy: boolean): void {
+  requestInFlight = isBusy;
+  updateControlsDisabled();
+}
+
+function setSessionRecoveryRequired(required: boolean): void {
+  sessionRecoveryRequired = required;
+  updateControlsDisabled();
+}
+
+function setActiveTurnId(turnId: string | null): void {
+  activeTurnId = turnId;
+  void persistActiveChatMarker();
+  updateControlsDisabled();
+}
+
+function updateControlsDisabled(): void {
+  const turnActive = activeTurnId !== null;
+  elements.ask.disabled = requestInFlight || turnActive || sessionRecoveryRequired;
+  elements.messageInput.disabled = requestInFlight || turnActive || sessionRecoveryRequired;
+  elements.debugCapture.disabled = requestInFlight;
+  elements.saveBridge.disabled = requestInFlight;
 }
 
 function setStatus(text: string): void {

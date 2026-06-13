@@ -3,43 +3,52 @@
 pub mod bridge;
 
 #[cfg(feature = "tauri-app")]
-use bridge::{BridgeRuntime, BridgeStatus};
+use screen_sidekick_sidekick_daemon::{DaemonRuntime, DaemonStatus};
 #[cfg(feature = "tauri-app")]
 use tauri::Manager;
 
 #[cfg(feature = "tauri-app")]
 #[derive(Debug, Clone)]
 pub struct AppState {
-    bridge_status: BridgeStatus,
+    daemon_status: DaemonStatus,
 }
 
 #[cfg(feature = "tauri-app")]
 impl AppState {
     #[must_use]
-    pub fn new(bridge_status: BridgeStatus) -> Self {
-        Self { bridge_status }
+    pub fn new(daemon_status: DaemonStatus) -> Self {
+        Self { daemon_status }
     }
 
     #[must_use]
-    pub fn bridge_status(&self) -> BridgeStatus {
-        self.bridge_status.clone()
+    pub fn daemon_status(&self) -> DaemonStatus {
+        self.daemon_status.clone()
     }
 }
 
 #[cfg(feature = "tauri-app")]
 #[tauri::command]
-fn get_bridge_status(state: tauri::State<'_, AppState>) -> BridgeStatus {
-    state.bridge_status()
+fn get_daemon_status(state: tauri::State<'_, AppState>) -> DaemonStatus {
+    state.daemon_status()
+}
+
+#[cfg(feature = "tauri-app")]
+#[tauri::command]
+fn get_bridge_status(state: tauri::State<'_, AppState>) -> DaemonStatus {
+    state.daemon_status()
 }
 
 #[cfg(feature = "tauri-app")]
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_bridge_status])
+        .invoke_handler(tauri::generate_handler![
+            get_daemon_status,
+            get_bridge_status
+        ])
         .setup(|app| {
-            let (bridge_runtime, bridge_status) = BridgeRuntime::start()?;
-            app.manage(AppState::new(bridge_status));
-            app.manage(bridge_runtime);
+            let (daemon_runtime, daemon_status) = DaemonRuntime::start()?;
+            app.manage(AppState::new(daemon_status));
+            app.manage(daemon_runtime);
             Ok(())
         })
         .run(tauri::generate_context!())

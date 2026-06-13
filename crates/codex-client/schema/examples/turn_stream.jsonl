@@ -1,0 +1,3 @@
+{"method":"turn/started","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"running"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread_123","turnId":"turn_123","itemId":"item_123","delta":"Hello"}}
+{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"completed"}}}
