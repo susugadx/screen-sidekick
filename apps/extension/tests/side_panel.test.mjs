@@ -67,7 +67,7 @@ test("turn already running rejection keeps the active turn and avoids unsent tra
   assert.equal(messageRows().length, 2);
 });
 
-test("failed send renders persisted user message from notification", async () => {
+test("failed send renders persisted user message without clearing draft from text-only match", async () => {
   const server = installSidePanelHarness({
     failAfterPersistSendNumbers: new Set([1]),
   });
@@ -79,7 +79,7 @@ test("failed send renders persisted user message from notification", async () =>
 
   assert.equal(transcriptText().includes("Question before Codex fails"), true);
   assert.equal(messageRows().length, 1);
-  assert.equal(element("message-input").value, "");
+  assert.equal(element("message-input").value, "Question before Codex fails");
   assert.equal(element("status").textContent, "Codex start failed.");
 });
 
@@ -242,6 +242,30 @@ test("websocket close before message send response recovers session without a kn
   assert.equal(server.sessionCreateCount, 1);
   assert.deepEqual(server.attachSessionIds, ["sess_1", "sess_1"]);
   assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_1"]);
+});
+
+test("websocket close before message persistence keeps draft when restored session has same text", async () => {
+  const repeatedQuestion = "Repeat this question";
+  const server = installSidePanelHarness({
+    closeBeforePersistSendNumbers: new Set([1]),
+    storage: activeChatStorage(scopedActiveChatMarkerWithoutTurn()),
+    sessions: completedActiveChatSessions(repeatedQuestion),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  submitMessage(repeatedQuestion);
+  await waitFor(() => server.sendCount === 1);
+  await waitFor(() => server.sessionGetCount === 2);
+
+  assert.equal(element("status").textContent, "Ready");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("message-input").value, repeatedQuestion);
+  assert.equal(messageRows().length, 1);
+  assert.equal(transcriptText().includes(repeatedQuestion), true);
+  assert.equal(server.sessionCreateCount, 0);
+  assert.deepEqual(server.subscribeSessionIds, ["sess_1", "sess_1"]);
 });
 
 test("recovery failure after message send response loss re-enables ask controls", async () => {
@@ -447,6 +471,35 @@ test("saving a different daemon URL clears stale transcript before next ask", as
   assert.equal(transcriptText().includes("Old daemon question"), false);
   assert.equal(transcriptText().includes("Fresh daemon question"), true);
   assert.equal(server.sessionCreateCount, 2);
+});
+
+test("saving different daemon settings disconnects old socket before stale errors update UI", async () => {
+  const server = installSidePanelHarness();
+  await importFreshSidePanel();
+
+  submitMessage("Old daemon question");
+  await waitFor(() => server.sendCount === 1);
+  const firstSocket = server.socket;
+
+  element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  firstSocket.emit("error", {});
+  firstSocket.receiveNotification("error", {
+    code: "internal_error",
+    message: "Old daemon error",
+  });
+  await nextTick();
+
+  assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
+  assert.equal(element("status").textContent, "Saved");
+  assert.equal(transcriptText(), "");
 });
 
 test("saving a different pairing token clears stale session state before next ask", async () => {
@@ -673,9 +726,37 @@ function scopedActiveChatMarker(overrides = {}) {
   };
 }
 
+function scopedActiveChatMarkerWithoutTurn() {
+  const { activeTurnId: _activeTurnId, ...marker } = scopedActiveChatMarker();
+  return marker;
+}
+
 function legacyActiveChatMarker() {
   const { tabId: _tabId, origin: _origin, ...legacyMarker } = scopedActiveChatMarker();
   return legacyMarker;
+}
+
+function completedActiveChatSessions(userText) {
+  return {
+    sess_1: {
+      session: {
+        id: "sess_1",
+        title: "Screen Sidekick",
+      },
+      messages: [
+        {
+          id: "msg_old",
+          session_id: "sess_1",
+          role: "user",
+          text: userText,
+          status: "completed",
+          turn_id: "turn_old",
+        },
+      ],
+      attachments: [],
+      active_turn: null,
+    },
+  };
 }
 
 function runningActiveChatSessions(userText = null) {
@@ -735,6 +816,7 @@ function nextTick() {
 
 class FakeSidekickServer {
   constructor({
+    closeBeforePersistSendNumbers = new Set(),
     closeBeforeSendResponseNumbers = new Set(),
     codexReadiness = {
       available: true,
@@ -746,6 +828,7 @@ class FakeSidekickServer {
     failSessionGetNumbers = new Set(),
     sessions = {},
   } = {}) {
+    this.closeBeforePersistSendNumbers = closeBeforePersistSendNumbers;
     this.closeBeforeSendResponseNumbers = closeBeforeSendResponseNumbers;
     this.codexReadiness = codexReadiness;
     this.deferMessageCreatedNumbers = deferMessageCreatedNumbers;
@@ -831,6 +914,10 @@ class FakeSidekickServer {
         this.sendSessionIds.push(request.params.session_id);
         if (this.failSendNumbers.has(this.sendCount)) {
           socket.receiveFailure(request.id, "turn_already_running", "A turn is already running.");
+          return;
+        }
+        if (this.closeBeforePersistSendNumbers.has(this.sendCount)) {
+          socket.close();
           return;
         }
         {

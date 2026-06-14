@@ -62,6 +62,7 @@ pub struct DaemonState {
     store: SessionStore,
     codex: Arc<dyn CodexTurnClient>,
     events: broadcast::Sender<JsonRpcNotification>,
+    websocket_shutdown: broadcast::Sender<()>,
     limits: ProtocolLimits,
     codex_start_timeout: Duration,
 }
@@ -99,11 +100,13 @@ impl DaemonState {
         options: DaemonOptions,
     ) -> Self {
         let (events, _) = broadcast::channel(options.event_buffer_capacity.max(1));
+        let (websocket_shutdown, _) = broadcast::channel(1);
         Self {
             token: token.into(),
             store,
             codex,
             events,
+            websocket_shutdown,
             limits: ProtocolLimits {
                 max_message_bytes: MAX_WS_MESSAGE_BYTES,
                 max_attachment_bytes: MAX_ATTACHMENT_BYTES,
@@ -120,6 +123,7 @@ impl DaemonState {
 
 pub struct DaemonRuntime {
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    websocket_shutdown: broadcast::Sender<()>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -154,12 +158,14 @@ impl DaemonRuntime {
             token: state.token.clone(),
             status: DaemonRuntimeStatus::Running,
         };
+        let websocket_shutdown = state.websocket_shutdown.clone();
         let router = build_daemon_router(state);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let thread = spawn_daemon_thread(runtime, listener, router, shutdown_receiver);
         Ok((
             Self {
                 shutdown: Mutex::new(Some(shutdown_sender)),
+                websocket_shutdown,
                 thread: Mutex::new(Some(thread)),
             },
             status,
@@ -174,6 +180,7 @@ impl Drop for DaemonRuntime {
                 let _ = sender.send(());
             }
         }
+        let _ = self.websocket_shutdown.send(());
 
         if let Ok(mut thread) = self.thread.lock() {
             if let Some(handle) = thread.take() {

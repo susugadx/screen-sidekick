@@ -370,6 +370,27 @@ async fn websocket_closes_lagged_subscribers_to_force_recovery() {
 }
 
 #[tokio::test]
+async fn daemon_runtime_drop_closes_live_websocket_before_join_returns() {
+    let (runtime, status, _store, _codex) = start_test_daemon(vec![]);
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let _init_result = send_request(
+        &mut socket,
+        "init",
+        method::INITIALIZE,
+        initialize_params(&status.token),
+    )
+    .await;
+
+    let drop_handle = tokio::task::spawn_blocking(move || drop(runtime));
+    tokio::time::timeout(Duration::from_secs(1), drop_handle)
+        .await
+        .expect("daemon runtime drop returns with a live websocket")
+        .expect("drop task completes");
+
+    expect_socket_disconnect(&mut socket).await;
+}
+
+#[tokio::test]
 async fn websocket_attach_browser_rejects_related_message_from_another_session() {
     let (_runtime, status, store, _codex) = start_test_daemon(vec![]);
     let source_session = store

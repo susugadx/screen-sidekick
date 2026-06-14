@@ -29,6 +29,7 @@ use crate::DaemonState;
 pub(crate) async fn websocket_loop(socket: WebSocket, state: DaemonState) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.events.subscribe();
+    let mut shutdown = state.websocket_shutdown.subscribe();
     let mut subscribed_sessions = HashSet::<String>::new();
     let mut initialized = false;
 
@@ -69,6 +70,7 @@ pub(crate) async fn websocket_loop(socket: WebSocket, state: DaemonState) {
                     | Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            _ = shutdown.recv() => break,
         }
     }
 }

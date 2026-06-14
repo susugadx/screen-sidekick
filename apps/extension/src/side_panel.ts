@@ -69,7 +69,14 @@ let sessionRecoveryRequired = false;
 let activeAssistantText = "";
 let activeAssistantTextElement: HTMLDivElement | null = null;
 let renderedMessageIds = new Set<string>();
-let pendingSubmittedQuestion: { sessionId: string; text: string } | null = null;
+type PendingSubmittedQuestion = {
+  sessionId: string;
+  text: string;
+  persistedMessageId?: string;
+  persistedTurnId?: string;
+};
+
+let pendingSubmittedQuestion: PendingSubmittedQuestion | null = null;
 
 const elements = {
   bridgeForm: requireElement("bridge-form", HTMLFormElement),
@@ -130,6 +137,7 @@ async function saveDaemonSettings(): Promise<void> {
   await chrome.storage.session.set({ [STORAGE_KEY]: settings });
   await chrome.storage.session.remove(LEGACY_STORAGE_KEY);
   if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
+    disconnectProtocolClient();
     clearActiveChatState();
     await clearActiveChatMarker();
   }
@@ -146,14 +154,21 @@ async function askCodex(): Promise<void> {
   setRequestInFlight(true);
   setStatus("Capturing");
 
+  let pendingQuestion: PendingSubmittedQuestion | null = null;
   try {
     const settings = readDaemonSettingsFromInputs();
     const client = await ensureProtocolClient(settings);
     const sessionId = await ensureActiveSession(client, settings);
     const context = await captureActiveTabContext();
     const attachment = await client.attachBrowserContext(sessionId, context, "message_send");
-    pendingSubmittedQuestion = { sessionId, text: question };
+    pendingQuestion = { sessionId, text: question };
+    pendingSubmittedQuestion = pendingQuestion;
     const sendResult = await client.sendMessage(sessionId, question, [attachment.id], "ask_only");
+    recordPendingSubmittedQuestionPersistence(
+      pendingQuestion,
+      sendResult.messageId,
+      sendResult.turnId,
+    );
     setActiveTurnId(sendResult.turnId);
     appendSessionMessage({
       id: sendResult.messageId,
@@ -167,6 +182,13 @@ async function askCodex(): Promise<void> {
     activeAssistantTextElement = appendTranscriptMessage("assistant", "");
     setStatus(attachment.safetyStatus === "warning" ? "Review" : "Asking");
   } catch (error) {
+    if (
+      !sessionRecoveryRequired &&
+      pendingQuestion &&
+      pendingSubmittedQuestion === pendingQuestion
+    ) {
+      pendingSubmittedQuestion = null;
+    }
     if (sessionRecoveryRequired) {
       setStatus("Reconnecting to daemon");
     } else {
@@ -209,11 +231,7 @@ async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickP
 
   const settingsChanged =
     hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings);
-  unsubscribeProtocolNotifications?.();
-  unsubscribeProtocolNotifications = null;
-  protocolClient?.close();
-  protocolClient = null;
-  subscribedSessionId = null;
+  disconnectProtocolClient();
   if (settingsChanged) {
     clearActiveChatState();
     void clearActiveChatMarker();
@@ -305,12 +323,7 @@ function clearActiveTurn(removeEmptyAssistantPlaceholder = false): void {
 }
 
 function handleProtocolConnectionLost(message: string): void {
-  const lostClient = protocolClient;
-  unsubscribeProtocolNotifications?.();
-  unsubscribeProtocolNotifications = null;
-  protocolClient = null;
-  subscribedSessionId = null;
-  lostClient?.close();
+  disconnectProtocolClient();
   if (shouldRecoverActiveSessionOnConnectionLoss()) {
     setSessionRecoveryRequired(true);
     setStatus("Reconnecting to daemon");
@@ -406,7 +419,7 @@ function appendSessionMessage(message: SidekickMessage, activeTurn?: SidekickTur
   renderedMessageIds.add(message.id);
 
   if (message.role === "user") {
-    clearPendingSubmittedQuestionIfPersisted(message);
+    clearPendingSubmittedQuestionIfPersisted(message, activeTurn);
     appendTranscriptMessage("user", message.text);
     return;
   }
@@ -435,17 +448,74 @@ function isActiveTurnStatus(status: SidekickTurn["status"]): boolean {
   return status === "pending" || status === "running";
 }
 
-function clearPendingSubmittedQuestionIfPersisted(message: SidekickMessage): void {
+function disconnectProtocolClient(): void {
+  const client = protocolClient;
+  unsubscribeProtocolNotifications?.();
+  unsubscribeProtocolNotifications = null;
+  protocolClient = null;
+  subscribedSessionId = null;
+  client?.close();
+}
+
+function recordPendingSubmittedQuestionPersistence(
+  pendingQuestion: PendingSubmittedQuestion,
+  messageId: string,
+  turnId: string,
+): void {
+  if (pendingSubmittedQuestion !== pendingQuestion) {
+    return;
+  }
+  pendingQuestion.persistedMessageId = messageId;
+  pendingQuestion.persistedTurnId = turnId;
+  clearPendingSubmittedQuestion(pendingQuestion);
+}
+
+function clearPendingSubmittedQuestionIfPersisted(
+  message: SidekickMessage,
+  activeTurn?: SidekickTurn,
+): void {
+  const pendingQuestion = pendingSubmittedQuestion;
+  if (!pendingQuestion) {
+    return;
+  }
+  if (!messageMatchesPendingSubmittedQuestion(message, pendingQuestion, activeTurn)) {
+    return;
+  }
+  clearPendingSubmittedQuestion(pendingQuestion);
+}
+
+function messageMatchesPendingSubmittedQuestion(
+  message: SidekickMessage,
+  pendingQuestion: PendingSubmittedQuestion,
+  activeTurn?: SidekickTurn,
+): boolean {
+  if (message.sessionId !== pendingQuestion.sessionId || message.text !== pendingQuestion.text) {
+    return false;
+  }
   if (
-    pendingSubmittedQuestion &&
-    message.sessionId === pendingSubmittedQuestion.sessionId &&
-    message.text === pendingSubmittedQuestion.text
+    pendingQuestion.persistedMessageId &&
+    message.id === pendingQuestion.persistedMessageId
   ) {
-    const submittedText = pendingSubmittedQuestion.text;
-    pendingSubmittedQuestion = null;
-    if (elements.messageInput.value.trim() === submittedText) {
-      elements.messageInput.value = "";
-    }
+    return true;
+  }
+  if (pendingQuestion.persistedTurnId && message.turnId === pendingQuestion.persistedTurnId) {
+    return true;
+  }
+  return Boolean(
+    activeTurn &&
+      activeTurn.sessionId === pendingQuestion.sessionId &&
+      message.turnId === activeTurn.id,
+  );
+}
+
+function clearPendingSubmittedQuestion(pendingQuestion: PendingSubmittedQuestion): void {
+  if (pendingSubmittedQuestion !== pendingQuestion) {
+    return;
+  }
+  const submittedText = pendingQuestion.text;
+  pendingSubmittedQuestion = null;
+  if (elements.messageInput.value.trim() === submittedText) {
+    elements.messageInput.value = "";
   }
 }
 
