@@ -1,5 +1,5 @@
 use screen_sidekick_codex_client::{
-    fixture_events_from_jsonl, hash_schema_bytes, schema_hash, CodexEvent,
+    fixture_events_from_jsonl, hash_schema_bytes, schema_hash, CodexClientErrorKind, CodexEvent,
 };
 
 #[test]
@@ -45,7 +45,42 @@ fn turn_completed_failed_status_maps_to_failed_event() {
         events,
         vec![CodexEvent::Failed {
             turn_id: Some("turn_123".to_owned()),
-            message: "model failed".to_owned()
+            message: "model failed".to_owned(),
+            error_kind: None
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_failed_status_preserves_unauthorized_error_kind() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"failed","error":{"message":"not logged in","codexErrorInfo":"unauthorized"}}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Failed {
+            turn_id: Some("turn_123".to_owned()),
+            message: "not logged in".to_owned(),
+            error_kind: Some(CodexClientErrorKind::NotLoggedIn)
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_interrupted_status_preserves_unauthorized_error_kind() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"interrupted","error":{"message":"not logged in","codexErrorInfo":{"unauthorized":{}}}}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Failed {
+            turn_id: Some("turn_123".to_owned()),
+            message: "not logged in".to_owned(),
+            error_kind: Some(CodexClientErrorKind::NotLoggedIn)
         }]
     );
 }
@@ -61,7 +96,8 @@ fn turn_completed_interrupted_status_maps_to_failed_event() {
         events,
         vec![CodexEvent::Failed {
             turn_id: Some("turn_123".to_owned()),
-            message: "Codex turn was interrupted.".to_owned()
+            message: "Codex turn was interrupted.".to_owned(),
+            error_kind: None
         }]
     );
 }
@@ -71,6 +107,24 @@ fn retryable_error_notification_is_non_terminal() {
     let events = fixture_events_from_jsonl(
         r#"
         {"method":"error","params":{"threadId":"thread_123","turnId":"turn_123","willRetry":true,"error":{"message":"temporary upstream error"}}}
+        {"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"completed"}}}
+        "#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn retryable_unauthorized_error_notification_is_non_terminal() {
+    let events = fixture_events_from_jsonl(
+        r#"
+        {"method":"error","params":{"threadId":"thread_123","turnId":"turn_123","willRetry":true,"error":{"message":"temporary auth error","codexErrorInfo":"unauthorized"}}}
         {"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"completed"}}}
         "#,
     )
@@ -95,7 +149,25 @@ fn non_retryable_error_notification_maps_to_failed_event() {
         events,
         vec![CodexEvent::Failed {
             turn_id: Some("turn_123".to_owned()),
-            message: "permanent upstream error".to_owned()
+            message: "permanent upstream error".to_owned(),
+            error_kind: None
+        }]
+    );
+}
+
+#[test]
+fn non_retryable_unauthorized_error_notification_maps_to_not_logged_in_failed_event() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"error","params":{"threadId":"thread_123","turnId":"turn_123","willRetry":false,"error":{"message":"not logged in","codexErrorInfo":"unauthorized"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Failed {
+            turn_id: Some("turn_123".to_owned()),
+            message: "not logged in".to_owned(),
+            error_kind: Some(CodexClientErrorKind::NotLoggedIn)
         }]
     );
 }

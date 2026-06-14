@@ -284,6 +284,38 @@ async fn readiness_reports_unsupported_when_initialize_times_out() {
 }
 
 #[tokio::test]
+async fn readiness_reports_unavailable_when_version_probe_times_out() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let pid_path = temp_dir.path().join("version-pid");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_hanging_version_codex_script(&pid_path),
+    );
+    let client =
+        StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(300));
+
+    let readiness = tokio::time::timeout(Duration::from_secs(2), client.readiness())
+        .await
+        .expect("readiness is bounded by the version probe timeout");
+
+    assert!(!readiness.available);
+    assert_eq!(readiness.version, None);
+    assert_eq!(
+        readiness.error,
+        Some(CodexClientErrorKind::AppServerUnavailable)
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("version probe pid is written")
+            .parse()
+            .expect("version probe pid parses");
+        assert_linux_process_reaped(pid).await;
+    }
+}
+
+#[tokio::test]
 async fn readiness_probe_success_is_reused_for_first_turn() {
     let temp_dir = tempfile::tempdir().expect("temp dir is created");
     let count_path = temp_dir.path().join("spawn-count");
@@ -345,6 +377,42 @@ async fn readiness_reports_ready_while_initialized_stdout_is_streaming() {
         CodexClientErrorKind::AppServerUnavailable
     );
     assert_eq!(read_spawn_count(&count_path), 1);
+}
+
+#[tokio::test]
+async fn readiness_while_streaming_bounds_version_probe_timeout() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let pid_path = temp_dir.path().join("version-pid");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_holding_stream_hanging_version_codex_script(&count_path, &pid_path),
+    );
+    let client =
+        StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(300));
+
+    let _events = client
+        .start_turn(start_request("streaming"))
+        .await
+        .expect("turn starts and loans stdout to stream reader")
+        .events;
+    let readiness = tokio::time::timeout(Duration::from_secs(2), client.readiness())
+        .await
+        .expect("streaming readiness is bounded by the version probe timeout");
+
+    assert!(readiness.available);
+    assert_eq!(readiness.version, None);
+    assert_eq!(readiness.error, None);
+    assert_eq!(read_spawn_count(&count_path), 1);
+
+    #[cfg(target_os = "linux")]
+    {
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("version probe pid is written")
+            .parse()
+            .expect("version probe pid parses");
+        assert_linux_process_reaped(pid).await;
+    }
 }
 
 fn fake_codex_script(count_path: &Path, first_exits_immediately: bool) -> String {
@@ -471,6 +539,21 @@ done
     )
 }
 
+fn fake_hanging_version_codex_script(pid_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s' "$$" > "{}"
+  while :; do
+    sleep 1
+  done
+fi
+exit 0
+"#,
+        pid_path.display()
+    )
+}
+
 fn fake_holding_stream_codex_script(count_path: &Path) -> String {
     format!(
         r#"#!/bin/sh
@@ -502,6 +585,44 @@ while IFS= read -r line; do
   esac
 done
 "#,
+        count_path.display()
+    )
+}
+
+fn fake_holding_stream_hanging_version_codex_script(count_path: &Path, pid_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s' "$$" > "{}"
+  while :; do
+    sleep 1
+  done
+fi
+count_file="{}"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"id":"%s","result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"id":"%s","result":{{"thread":{{"id":"thread_%s"}}}}}}\n' "$id" "$count"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"id":"%s","result":{{"turn":{{"id":"turn_%s"}}}}}}\n' "$id" "$count"
+      sleep 2
+      exit 0
+      ;;
+  esac
+done
+"#,
+        pid_path.display(),
         count_path.display()
     )
 }

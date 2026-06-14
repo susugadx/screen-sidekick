@@ -268,42 +268,8 @@ test("recovery failure after message send response loss re-enables ask controls"
 
 test("side panel reload restores a persisted in-flight session", async () => {
   const server = installSidePanelHarness({
-    storage: {
-      daemonSettings: {
-        url: "http://127.0.0.1:43001",
-        token: "pairing-token",
-      },
-      activeChat: {
-        daemonUrl: "http://127.0.0.1:43001",
-        daemonToken: "pairing-token",
-        sessionId: "sess_1",
-        activeTurnId: "turn_1",
-      },
-    },
-    sessions: {
-      sess_1: {
-        session: {
-          id: "sess_1",
-          title: "Screen Sidekick",
-        },
-        messages: [
-          {
-            id: "msg_1",
-            session_id: "sess_1",
-            role: "user",
-            text: "Persisted question",
-            status: "pending",
-            turn_id: "turn_1",
-          },
-        ],
-        attachments: [],
-        active_turn: {
-          id: "turn_1",
-          session_id: "sess_1",
-          status: "running",
-        },
-      },
-    },
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions("Persisted question"),
   });
   await importFreshSidePanel();
   await waitFor(() => server.sessionGetCount === 1);
@@ -328,33 +294,8 @@ test("side panel reload restores a persisted in-flight session", async () => {
 test("stored active chat recovery failure re-enables ask controls", async () => {
   const server = installSidePanelHarness({
     failSessionGetNumbers: new Set([1]),
-    storage: {
-      daemonSettings: {
-        url: "http://127.0.0.1:43001",
-        token: "pairing-token",
-      },
-      activeChat: {
-        daemonUrl: "http://127.0.0.1:43001",
-        daemonToken: "pairing-token",
-        sessionId: "sess_1",
-        activeTurnId: "turn_1",
-      },
-    },
-    sessions: {
-      sess_1: {
-        session: {
-          id: "sess_1",
-          title: "Screen Sidekick",
-        },
-        messages: [],
-        attachments: [],
-        active_turn: {
-          id: "turn_1",
-          session_id: "sess_1",
-          status: "running",
-        },
-      },
-    },
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions(),
   });
   await importFreshSidePanel();
   await waitFor(() => server.sessionGetCount === 1);
@@ -366,42 +307,8 @@ test("stored active chat recovery failure re-enables ask controls", async () => 
 
 test("stored active chat with a different token is not recovered", async () => {
   const server = installSidePanelHarness({
-    storage: {
-      daemonSettings: {
-        url: "http://127.0.0.1:43001",
-        token: "pairing-token",
-      },
-      activeChat: {
-        daemonUrl: "http://127.0.0.1:43001",
-        daemonToken: "old-token",
-        sessionId: "sess_1",
-        activeTurnId: "turn_1",
-      },
-    },
-    sessions: {
-      sess_1: {
-        session: {
-          id: "sess_1",
-          title: "Screen Sidekick",
-        },
-        messages: [
-          {
-            id: "msg_1",
-            session_id: "sess_1",
-            role: "user",
-            text: "Stale token question",
-            status: "pending",
-            turn_id: "turn_1",
-          },
-        ],
-        attachments: [],
-        active_turn: {
-          id: "turn_1",
-          session_id: "sess_1",
-          status: "running",
-        },
-      },
-    },
+    storage: activeChatStorage(scopedActiveChatMarker({ daemonToken: "old-token" })),
+    sessions: runningActiveChatSessions("Stale token question"),
   });
   await importFreshSidePanel();
   await nextTick();
@@ -410,6 +317,67 @@ test("stored active chat with a different token is not recovered", async () => {
   assert.equal(element("ask").disabled, false);
   assert.equal(element("message-input").disabled, false);
   assert.equal(transcriptText(), "");
+});
+
+test("stored active chat with a different tab is not recovered", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(scopedActiveChatMarker({ tabId: 8 })),
+    sessions: runningActiveChatSessions("Different tab question"),
+  });
+  await importFreshSidePanel();
+  await nextTick();
+
+  assert.equal(server.sessionGetCount, 0);
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText(), "");
+});
+
+test("stored active chat with a different origin is not recovered", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(scopedActiveChatMarker({ origin: "https://other.example" })),
+    sessions: runningActiveChatSessions("Different origin question"),
+  });
+  await importFreshSidePanel();
+  await nextTick();
+
+  assert.equal(server.sessionGetCount, 0);
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText(), "");
+});
+
+test("legacy stored active chat without tab scope is not recovered", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(legacyActiveChatMarker()),
+    sessions: runningActiveChatSessions("Legacy marker question"),
+  });
+  await importFreshSidePanel();
+  await nextTick();
+
+  assert.equal(server.sessionGetCount, 0);
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText(), "");
+});
+
+test("new active chat marker stores current tab and origin scope", async () => {
+  installSidePanelHarness();
+  await importFreshSidePanel();
+
+  submitMessage("Scoped marker question");
+  const marker = await waitForStoredActiveChat(
+    (value) => value?.activeTurnId === "turn_1",
+  );
+
+  assert.deepEqual(marker, {
+    daemonUrl: "http://127.0.0.1:43001",
+    daemonToken: "pairing-token",
+    tabId: 7,
+    origin: "https://example.test",
+    sessionId: "sess_1",
+    activeTurnId: "turn_1",
+  });
 });
 
 test("session not found recovery clears stale transcript", async () => {
@@ -683,6 +651,63 @@ function transcriptText() {
   return element("transcript").textContent ?? "";
 }
 
+function activeChatStorage(activeChat) {
+  return {
+    daemonSettings: {
+      url: "http://127.0.0.1:43001",
+      token: "pairing-token",
+    },
+    activeChat,
+  };
+}
+
+function scopedActiveChatMarker(overrides = {}) {
+  return {
+    daemonUrl: "http://127.0.0.1:43001",
+    daemonToken: "pairing-token",
+    tabId: 7,
+    origin: "https://example.test",
+    sessionId: "sess_1",
+    activeTurnId: "turn_1",
+    ...overrides,
+  };
+}
+
+function legacyActiveChatMarker() {
+  const { tabId: _tabId, origin: _origin, ...legacyMarker } = scopedActiveChatMarker();
+  return legacyMarker;
+}
+
+function runningActiveChatSessions(userText = null) {
+  const messages = userText
+    ? [
+        {
+          id: "msg_1",
+          session_id: "sess_1",
+          role: "user",
+          text: userText,
+          status: "pending",
+          turn_id: "turn_1",
+        },
+      ]
+    : [];
+  return {
+    sess_1: {
+      session: {
+        id: "sess_1",
+        title: "Screen Sidekick",
+      },
+      messages,
+      attachments: [],
+      active_turn: {
+        id: "turn_1",
+        session_id: "sess_1",
+        status: "running",
+      },
+    },
+  };
+}
+
 async function waitFor(predicate) {
   for (let index = 0; index < 100; index += 1) {
     if (predicate()) {
@@ -691,6 +716,17 @@ async function waitFor(predicate) {
     await nextTick();
   }
   assert.fail("condition was not met");
+}
+
+async function waitForStoredActiveChat(predicate) {
+  for (let index = 0; index < 100; index += 1) {
+    const stored = await chrome.storage.session.get(["activeChat"]);
+    if (predicate(stored.activeChat)) {
+      return stored.activeChat;
+    }
+    await nextTick();
+  }
+  assert.fail("stored active chat condition was not met");
 }
 
 function nextTick() {

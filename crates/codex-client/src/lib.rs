@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, Mutex},
     time::timeout,
@@ -76,6 +76,7 @@ pub enum CodexEvent {
     Failed {
         turn_id: Option<String>,
         message: String,
+        error_kind: Option<CodexClientErrorKind>,
     },
     Unknown {
         method: String,
@@ -170,10 +171,11 @@ impl StdioCodexClient {
     }
 
     pub async fn version(&self) -> Result<String, CodexClientError> {
-        let output = Command::new(&self.codex_path)
+        let mut child = Command::new(&self.codex_path)
             .arg("--version")
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     CodexClientError::new(
@@ -187,15 +189,49 @@ impl StdioCodexClient {
                     )
                 }
             })?;
+        let Some(mut stdout) = child.stdout.take() else {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(CodexClientError::protocol(
+                "codex --version stdout is unavailable",
+            ));
+        };
+        let mut output = Vec::new();
+        let status = match timeout(self.startup_timeout, async {
+            stdout.read_to_end(&mut output).await.map_err(|error| {
+                CodexClientError::new(
+                    CodexClientErrorKind::AppServerUnavailable,
+                    format!("failed to read codex --version output: {error}"),
+                )
+            })?;
+            child.wait().await.map_err(|error| {
+                CodexClientError::new(
+                    CodexClientErrorKind::AppServerUnavailable,
+                    format!("failed to wait for codex --version: {error}"),
+                )
+            })
+        })
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(CodexClientError::new(
+                    CodexClientErrorKind::AppServerUnavailable,
+                    "codex --version timed out",
+                ));
+            }
+        };
 
-        if !output.status.success() {
+        if !status.success() {
             return Err(CodexClientError::new(
                 CodexClientErrorKind::AppServerUnavailable,
                 "codex --version failed",
             ));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        Ok(String::from_utf8_lossy(&output).trim().to_owned())
     }
 }
 
@@ -775,12 +811,14 @@ fn map_turn_completed(params: &Value) -> Result<MappedCodexNotification, CodexCl
             message: turn_error_message(turn)
                 .unwrap_or("Codex turn failed.")
                 .to_owned(),
+            error_kind: turn_error_kind(turn),
         })),
         "interrupted" => Ok(MappedCodexNotification::Emit(CodexEvent::Failed {
             turn_id: Some(turn_id),
             message: turn_error_message(turn)
                 .unwrap_or("Codex turn was interrupted.")
                 .to_owned(),
+            error_kind: turn_error_kind(turn),
         })),
         "inProgress" => Err(CodexClientError::protocol(
             "turn/completed carried non-terminal status inProgress",
@@ -814,6 +852,7 @@ fn map_error_notification(params: &Value) -> Result<MappedCodexNotification, Cod
     Ok(MappedCodexNotification::Emit(CodexEvent::Failed {
         turn_id: Some(turn_id),
         message,
+        error_kind: turn_error_kind(params),
     }))
 }
 
@@ -868,6 +907,25 @@ fn turn_error_message(turn: &Value) -> Option<&str> {
     turn.get("error")
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
+}
+
+fn turn_error_kind(value: &Value) -> Option<CodexClientErrorKind> {
+    let error_info = value
+        .get("error")
+        .and_then(|error| error.get("codexErrorInfo"))?;
+    if codex_error_info_name(error_info) == Some("unauthorized") {
+        Some(CodexClientErrorKind::NotLoggedIn)
+    } else {
+        None
+    }
+}
+
+fn codex_error_info_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| object.keys().map(String::as_str).next())
+    })
 }
 
 fn parse_wire_message(line: &str) -> Result<WireMessage, CodexClientError> {
@@ -1164,7 +1222,8 @@ mod tests {
             event,
             CodexEvent::Failed {
                 turn_id: Some("turn_active".to_owned()),
-                message: "permanent failure".to_owned()
+                message: "permanent failure".to_owned(),
+                error_kind: None
             }
         );
         assert!(event_is_terminal_for_active_turn(&event, "turn_active"));

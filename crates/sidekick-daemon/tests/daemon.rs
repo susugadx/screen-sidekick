@@ -449,6 +449,7 @@ async fn websocket_codex_failed_event_emits_turn_failed_and_clears_active_turn()
     let events = vec![CodexEvent::Failed {
         turn_id: Some("fake_turn".to_owned()),
         message: "model failed".to_owned(),
+        error_kind: None,
     }];
     let (_runtime, status, store, _codex) = start_test_daemon(events);
     let mut socket = connect_to_daemon(&status.ws_url).await;
@@ -487,6 +488,71 @@ async fn websocket_codex_failed_event_emits_turn_failed_and_clears_active_turn()
         .messages
         .iter()
         .all(|message| message.role != MessageRole::Assistant));
+}
+
+#[tokio::test]
+async fn websocket_codex_not_logged_in_failed_event_preserves_failure_code_for_retry() {
+    let events = vec![CodexEvent::Failed {
+        turn_id: Some("fake_turn".to_owned()),
+        message: "not logged in".to_owned(),
+        error_kind: Some(CodexClientErrorKind::NotLoggedIn),
+    }];
+    let (_runtime, status, store, _codex) = start_test_daemon(events);
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+
+    let send_result = send_request(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Continue",
+            "idempotency_key": "not-logged-in-event",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    let turn_id = send_result["turn_id"]
+        .as_str()
+        .expect("turn id is returned")
+        .to_owned();
+
+    let notifications = read_notifications_until(&mut socket, notification::TURN_FAILED).await;
+    let failed = notifications
+        .iter()
+        .find(|value| {
+            value.get("method").and_then(Value::as_str) == Some(notification::TURN_FAILED)
+        })
+        .expect("turn failed notification is emitted");
+    assert_eq!(failed["params"]["message"], json!("not logged in"));
+    assert_eq!(
+        failed["params"]["turn"]["error"]["code"],
+        json!("codex_not_logged_in")
+    );
+
+    let stored_turn = store.get_turn(&turn_id).expect("turn loads");
+    assert_eq!(
+        stored_turn.error.as_ref().map(|error| &error.code),
+        Some(&ErrorCode::CodexNotLoggedIn)
+    );
+
+    let retry_error = send_request_expect_error(
+        &mut socket,
+        "send-retry",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id,
+            "text": "Continue",
+            "idempotency_key": "not-logged-in-event",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    assert_eq!(retry_error.code, ErrorCode::CodexNotLoggedIn);
+    assert_eq!(retry_error.message, "Previous message/send attempt failed.");
 }
 
 #[tokio::test]

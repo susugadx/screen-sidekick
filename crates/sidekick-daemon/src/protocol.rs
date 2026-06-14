@@ -649,12 +649,16 @@ fn spawn_turn_stream(
                     }
                     return;
                 }
-                Ok(CodexEvent::Failed { message, .. }) => {
+                Ok(CodexEvent::Failed {
+                    message,
+                    error_kind,
+                    ..
+                }) => {
                     fail_streaming_turn(
                         &state,
                         &session_id,
                         &local_turn_id,
-                        ErrorCode::CodexTurnFailed,
+                        streaming_failure_error_code(error_kind),
                         message,
                     );
                     return;
@@ -719,6 +723,13 @@ fn fail_streaming_turn(
             );
         }
         Err(error) => broadcast_error(&state.events, session_error(error)),
+    }
+}
+
+fn streaming_failure_error_code(error_kind: Option<CodexClientErrorKind>) -> ErrorCode {
+    match error_kind {
+        Some(CodexClientErrorKind::NotLoggedIn) => ErrorCode::CodexNotLoggedIn,
+        _ => ErrorCode::CodexTurnFailed,
     }
 }
 

@@ -321,7 +321,7 @@ function handleProtocolConnectionLost(message: string): void {
 }
 
 async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<void> {
-  const marker = await loadActiveChatMarker(settings);
+  const marker = await loadActiveChatMarker(settings, initialCaptureGrant);
   if (!marker) {
     return;
   }
@@ -738,13 +738,20 @@ async function loadDaemonSettings(): Promise<DaemonSettings | null> {
 }
 
 async function persistActiveChatMarker(): Promise<void> {
-  if (!activeSessionId || !activeSessionDaemonUrl || !activeSessionDaemonToken) {
+  if (
+    !activeSessionId ||
+    !activeSessionDaemonUrl ||
+    !activeSessionDaemonToken ||
+    !initialCaptureGrant
+  ) {
     await clearActiveChatMarker();
     return;
   }
   const marker: ActiveChatMarker = {
     daemonUrl: activeSessionDaemonUrl,
     daemonToken: activeSessionDaemonToken,
+    tabId: initialCaptureGrant.tabId,
+    origin: initialCaptureGrant.origin,
     sessionId: activeSessionId,
   };
   if (activeTurnId) {
