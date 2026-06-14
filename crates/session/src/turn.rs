@@ -125,6 +125,22 @@ impl SessionStore {
         Ok(thread_id)
     }
 
+    pub fn clear_codex_thread_link(
+        &self,
+        session_id: &str,
+        expected_codex_thread_id: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SessionStoreError::LockPoisoned)?;
+        let changed = connection.execute(
+            "DELETE FROM codex_thread_links WHERE session_id = ? AND codex_thread_id = ?",
+            params![session_id, expected_codex_thread_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn mark_turn_running(
         &self,
         turn_id: &str,

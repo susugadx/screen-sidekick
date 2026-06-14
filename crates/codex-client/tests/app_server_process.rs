@@ -2,7 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::StreamExt as _;
@@ -57,6 +57,28 @@ async fn stdio_client_restarts_after_startup_timeout() {
     assert_eq!(second.codex_thread_id, "thread_2");
     assert_eq!(second.codex_turn_id.as_deref(), Some("turn_2"));
     assert_eq!(read_spawn_count(&count_path), 2);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stdio_client_reaps_process_after_startup_timeout() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let pid_path = temp_dir.path().join("pid");
+    let script_path =
+        write_fake_codex_script(temp_dir.path(), &fake_hanging_codex_script(&pid_path));
+    let client = StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(10));
+
+    let error = match client.start_turn(start_request("first")).await {
+        Ok(_) => panic!("hanging process succeeded unexpectedly"),
+        Err(error) => error,
+    };
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("pid is written")
+        .parse()
+        .expect("pid parses");
+
+    assert_eq!(error.kind, CodexClientErrorKind::AppServerUnavailable);
+    assert_linux_process_reaped(pid).await;
 }
 
 #[tokio::test]
@@ -159,13 +181,38 @@ async fn stdio_client_resumes_stored_thread_after_process_restart() {
         read_request_log(&log_path),
         [
             "1 initialize",
+            "1 initialized",
             "1 thread/start",
             "1 turn/start",
             "2 initialize",
+            "2 initialized",
             "2 thread/resume",
             "2 turn/start",
         ]
     );
+}
+
+#[tokio::test]
+async fn stdio_client_classifies_unresumable_thread_resume_errors() {
+    for message in [
+        "thread not found",
+        "no rollout found for thread id 018f4c18-9d6d-7000-a000-000000000000",
+    ] {
+        let temp_dir = tempfile::tempdir().expect("temp dir is created");
+        let script_path =
+            write_fake_codex_script(temp_dir.path(), &fake_missing_thread_codex_script(message));
+        let client = StdioCodexClient::new(script_path);
+        let mut request = start_request("missing");
+        request.codex_thread_id = Some("missing_thread".to_owned());
+
+        let error = match client.start_turn(request).await {
+            Ok(_) => panic!("missing thread resume unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, CodexClientErrorKind::ThreadNotFound);
+        assert_eq!(error.message, message);
+    }
 }
 
 fn fake_codex_script(count_path: &Path, first_exits_immediately: bool) -> String {
@@ -243,6 +290,18 @@ done
     )
 }
 
+fn fake_hanging_codex_script(pid_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+printf '%s' "$$" > "{}"
+while IFS= read -r _line; do
+  :
+done
+"#,
+        pid_path.display()
+    )
+}
+
 fn fake_reusable_terminal_codex_script(count_path: &Path) -> String {
     format!(
         r#"#!/bin/sh
@@ -294,6 +353,9 @@ while IFS= read -r line; do
       printf '%s initialize\n' "$count" >> "$log_file"
       printf '{{"id":"sidekick_req_1","result":{{}}}}\n'
       ;;
+    *'"method":"initialized"'*)
+      printf '%s initialized\n' "$count" >> "$log_file"
+      ;;
     *'"method":"thread/start"'*)
       printf '%s thread/start\n' "$count" >> "$log_file"
       printf '{{"id":"sidekick_req_2","result":{{"thread":{{"id":"thread_%s"}}}}}}\n' "$count"
@@ -312,6 +374,25 @@ done
 "#,
         count_path.display(),
         log_path.display()
+    )
+}
+
+fn fake_missing_thread_codex_script(message: &str) -> String {
+    let message = message.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"id":"sidekick_req_1","result":{{}}}}\n'
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"id":"sidekick_req_2","error":{{"message":"{}"}}}}\n'
+      ;;
+  esac
+done
+"#,
+        message
     )
 }
 
@@ -341,6 +422,21 @@ fn read_request_log(log_path: &Path) -> Vec<String> {
         .lines()
         .map(ToOwned::to_owned)
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_linux_process_reaped(pid: u32) {
+    let stat_path = format!("/proc/{pid}/stat");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if std::fs::read_to_string(&stat_path).is_err() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("codex app-server process {pid} was not reaped");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 fn start_request(label: &str) -> StartTurnRequest {

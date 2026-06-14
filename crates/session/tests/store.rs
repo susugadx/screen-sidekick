@@ -237,6 +237,33 @@ fn unsupported_version_failure_round_trips_through_turn_and_idempotency() {
 }
 
 #[test]
+fn clear_codex_thread_link_only_removes_expected_thread() {
+    let store = SessionStore::in_memory().expect("store opens");
+    let session = store.create_session(Some("Test")).expect("session created");
+    store
+        .link_codex_thread(&session.id, "thread_1", None, None)
+        .expect("thread link is stored");
+
+    let mismatched = store
+        .clear_codex_thread_link(&session.id, "thread_other")
+        .expect("mismatched clear runs");
+    let retained = store
+        .codex_thread_id(&session.id)
+        .expect("thread link loads");
+    let cleared = store
+        .clear_codex_thread_link(&session.id, "thread_1")
+        .expect("matching clear runs");
+    let missing = store
+        .codex_thread_id(&session.id)
+        .expect("thread link loads after clear");
+
+    assert!(!mismatched);
+    assert_eq!(retained.as_deref(), Some("thread_1"));
+    assert!(cleared);
+    assert_eq!(missing, None);
+}
+
+#[test]
 fn cancelled_idempotency_retry_is_rejected_without_reusing_turn() {
     let store = SessionStore::in_memory().expect("store opens");
     let session = store.create_session(Some("Test")).expect("session created");

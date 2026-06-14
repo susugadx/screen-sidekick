@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -651,6 +652,65 @@ async fn websocket_codex_start_failure_emits_turn_failed_and_clears_active_turn(
     assert_eq!(retry_error.message, "Previous message/send attempt failed.");
     assert!(read_notification_with_timeout(&mut socket).await.is_none());
     assert_eq!(codex.start_count(), 1);
+}
+
+#[tokio::test]
+async fn websocket_stale_codex_thread_link_is_cleared_and_retried_once() {
+    let events = vec![CodexEvent::Completed {
+        turn_id: "fake_turn".to_owned(),
+    }];
+    let (_runtime, status, store, codex) = start_test_daemon_failing_once_then_success(
+        CodexClientError::new(CodexClientErrorKind::ThreadNotFound, "thread not found"),
+        events,
+    );
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+    store
+        .link_codex_thread(&session_id, "stale_thread", None, None)
+        .expect("stale thread link is seeded");
+
+    let send_result = send_request(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Continue",
+            "idempotency_key": "stale-thread",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    let notifications = read_notifications_until(&mut socket, notification::TURN_COMPLETED).await;
+
+    assert_eq!(send_result["reused"], json!(false));
+    assert_eq!(codex.start_count(), 2);
+    let retry_request = codex
+        .last_request()
+        .expect("retry start_turn request was recorded");
+    assert_eq!(retry_request.codex_thread_id, None);
+    assert_eq!(
+        store
+            .codex_thread_id(&session_id)
+            .expect("thread link loads")
+            .as_deref(),
+        Some("fake_thread")
+    );
+    assert!(!notifications.iter().any(|value| {
+        value.get("method").and_then(Value::as_str) == Some(notification::TURN_FAILED)
+    }));
+
+    let session_state = store.get_session(&session_id).expect("session loads");
+    assert!(session_state.active_turn.is_none());
+    assert_eq!(
+        session_state
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User && message.text == "Continue")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1463,6 +1523,24 @@ fn start_test_daemon_failing_start(
     (runtime, status, store, codex)
 }
 
+fn start_test_daemon_failing_once_then_success(
+    error: CodexClientError,
+    events: Vec<CodexEvent>,
+) -> (
+    DaemonRuntime,
+    screen_sidekick_sidekick_daemon::DaemonStatus,
+    SessionStore,
+    Arc<RecordingCodexClient>,
+) {
+    let store = SessionStore::in_memory().expect("in-memory store opens");
+    let codex = Arc::new(RecordingCodexClient::new_failing_once_then_success(
+        error, events,
+    ));
+    let state = DaemonState::new(TOKEN, store.clone(), codex.clone());
+    let (runtime, status) = DaemonRuntime::start_with_state(state).expect("daemon starts");
+    (runtime, status, store, codex)
+}
+
 fn start_test_daemon_hanging_start() -> (
     DaemonRuntime,
     screen_sidekick_sidekick_daemon::DaemonStatus,
@@ -1792,6 +1870,7 @@ struct RecordingCodexClient {
     readiness: CodexReadiness,
     events: Vec<CodexEvent>,
     start_error: Option<CodexClientError>,
+    queued_start_errors: Mutex<VecDeque<CodexClientError>>,
     supports_turn_cancel: bool,
     last_request: Mutex<Option<StartTurnRequest>>,
     start_count: Mutex<usize>,
@@ -1812,6 +1891,7 @@ impl RecordingCodexClient {
             },
             events,
             start_error: None,
+            queued_start_errors: Mutex::new(VecDeque::new()),
             supports_turn_cancel,
             last_request: Mutex::new(None),
             start_count: Mutex::new(0),
@@ -1832,6 +1912,7 @@ impl RecordingCodexClient {
             },
             events: Vec::new(),
             start_error: None,
+            queued_start_errors: Mutex::new(VecDeque::new()),
             supports_turn_cancel,
             last_request: Mutex::new(None),
             start_count: Mutex::new(0),
@@ -1852,6 +1933,7 @@ impl RecordingCodexClient {
             },
             events: Vec::new(),
             start_error: None,
+            queued_start_errors: Mutex::new(VecDeque::new()),
             supports_turn_cancel: false,
             last_request: Mutex::new(None),
             start_count: Mutex::new(0),
@@ -1879,6 +1961,7 @@ impl RecordingCodexClient {
                 },
                 events: Vec::new(),
                 start_error: None,
+                queued_start_errors: Mutex::new(VecDeque::new()),
                 supports_turn_cancel,
                 last_request: Mutex::new(None),
                 start_count: Mutex::new(0),
@@ -1901,6 +1984,28 @@ impl RecordingCodexClient {
             },
             events: Vec::new(),
             start_error: Some(error),
+            queued_start_errors: Mutex::new(VecDeque::new()),
+            supports_turn_cancel: false,
+            last_request: Mutex::new(None),
+            start_count: Mutex::new(0),
+            cancel_count: Mutex::new(0),
+            last_cancel_turn_id: Mutex::new(None),
+            hold_stream_open: false,
+            hang_start: false,
+            controlled_events: Mutex::new(None),
+        }
+    }
+
+    fn new_failing_once_then_success(error: CodexClientError, events: Vec<CodexEvent>) -> Self {
+        Self {
+            readiness: CodexReadiness {
+                available: true,
+                version: Some("fake-codex".to_owned()),
+                error: None,
+            },
+            events,
+            start_error: None,
+            queued_start_errors: Mutex::new(VecDeque::from([error])),
             supports_turn_cancel: false,
             last_request: Mutex::new(None),
             start_count: Mutex::new(0),
@@ -1959,6 +2064,14 @@ impl CodexTurnClient for RecordingCodexClient {
             .start_count
             .lock()
             .expect("recording lock is not poisoned") += 1;
+        if let Some(error) = self
+            .queued_start_errors
+            .lock()
+            .expect("recording lock is not poisoned")
+            .pop_front()
+        {
+            return Err(error);
+        }
         if let Some(error) = &self.start_error {
             return Err(error.clone());
         }
