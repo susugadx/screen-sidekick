@@ -1,7 +1,9 @@
 import {
   JSONRPC_VERSION,
   SidekickProtocolError,
+  type CodexReadiness,
   type ErrorCode,
+  type InitializeResult,
   type MessageRole,
   type MessageSendResult,
   type MessageStatus,
@@ -128,6 +130,17 @@ export function parseMessageSendResult(value: unknown): MessageSendResult | null
   };
 }
 
+export function parseInitializeResult(value: unknown): InitializeResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const codexReadiness = parseCodexReadiness(value.codex_readiness);
+  if (!codexReadiness) {
+    return null;
+  }
+  return { codexReadiness };
+}
+
 export function parseIgnoredResult(_value: unknown): Record<string, never> {
   return {};
 }
@@ -176,6 +189,30 @@ function parseProtocolError(value: unknown): SidekickProtocolError | null {
   }
   const retryable = isRecord(value.data) ? getBoolean(value.data, "retryable") : undefined;
   return new SidekickProtocolError(code, message, retryable ?? undefined);
+}
+
+function parseCodexReadiness(value: unknown): CodexReadiness | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const available = getBoolean(value, "available");
+  if (available === null) {
+    return null;
+  }
+
+  const readiness: CodexReadiness = { available };
+  const version = getString(value, "version");
+  if (version) {
+    readiness.version = version;
+  }
+  if (Object.hasOwn(value, "error_code")) {
+    const errorCode = parseErrorCode(value.error_code);
+    if (!errorCode) {
+      return null;
+    }
+    readiness.errorCode = errorCode;
+  }
+  return readiness;
 }
 
 function parseTurnDeltaNotification(value: unknown): SidekickNotification | null {

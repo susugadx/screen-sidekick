@@ -202,17 +202,60 @@ impl StdioCodexClient {
 #[async_trait]
 impl CodexTurnClient for StdioCodexClient {
     async fn readiness(&self) -> CodexReadiness {
-        match self.version().await {
-            Ok(version) => CodexReadiness {
+        let active_initialized_stream = {
+            let mut guard = self.state.lock().await;
+            if cached_process_has_exited(&mut guard) {
+                *guard = None;
+            }
+            guard
+                .as_ref()
+                .is_some_and(|process| process.initialized && process.stdout.is_none())
+        };
+        if active_initialized_stream {
+            return CodexReadiness {
+                available: true,
+                version: self.version().await.ok(),
+                error: None,
+            };
+        }
+
+        let version = match self.version().await {
+            Ok(version) => version,
+            Err(error) => {
+                return CodexReadiness {
+                    available: false,
+                    version: None,
+                    error: Some(error.kind),
+                };
+            }
+        };
+
+        let mut guard = self.state.lock().await;
+        let probe_result = timeout(self.startup_timeout, async {
+            let process = ensure_process(&mut guard, &self.codex_path).await?;
+            if !process.initialized {
+                process.initialize().await?;
+            }
+            Ok::<_, CodexClientError>(())
+        })
+        .await;
+
+        match probe_result {
+            Ok(Ok(())) => CodexReadiness {
                 available: true,
                 version: Some(version),
                 error: None,
             },
-            Err(error) => CodexReadiness {
-                available: false,
-                version: None,
-                error: Some(error.kind),
-            },
+            Ok(Err(_)) | Err(_) => {
+                let process = guard.take();
+                drop(guard);
+                terminate_cached_process(process).await;
+                CodexReadiness {
+                    available: false,
+                    version: Some(version),
+                    error: Some(CodexClientErrorKind::UnsupportedVersion),
+                }
+            }
         }
     }
 
@@ -452,8 +495,10 @@ impl AppServerProcess {
             }
             let message = parse_wire_message(&line)?;
             match message {
-                WireMessage::Response(response) if response.id == id => return Ok(response.result),
-                WireMessage::Error(error) if error.id == id => {
+                WireMessage::Response(response) if response.id.matches_str(id) => {
+                    return Ok(response.result)
+                }
+                WireMessage::Error(error) if error.id.matches_str(id) => {
                     let error_message = error.error.message;
                     return Err(CodexClientError::new(
                         request_error_kind(method, &error_message),
@@ -948,14 +993,33 @@ enum WireMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RequestId {
+    String(String),
+    Integer(i64),
+}
+
+impl RequestId {
+    fn matches_str(&self, expected: &str) -> bool {
+        match self {
+            Self::String(actual) => actual == expected,
+            Self::Integer(number) => {
+                let _ = number;
+                false
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct WireResponse {
-    id: String,
+    id: RequestId,
     result: Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct WireErrorResponse {
-    id: String,
+    id: RequestId,
     error: WireError,
 }
 
@@ -967,7 +1031,7 @@ struct WireError {
 #[derive(Debug, Deserialize)]
 struct WireServerRequest {
     #[allow(dead_code)]
-    id: String,
+    id: RequestId,
     method: String,
     #[serde(default)]
     #[allow(dead_code)]

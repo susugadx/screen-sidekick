@@ -83,6 +83,28 @@ test("failed send renders persisted user message from notification", async () =>
   assert.equal(element("status").textContent, "Codex start failed.");
 });
 
+test("codex unavailable initialize stops ask before capture or message send", async () => {
+  const server = installSidePanelHarness({
+    codexReadiness: {
+      available: false,
+      error_code: "unsupported_codex_version",
+    },
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Will this reach Codex?");
+  await waitFor(
+    () => element("status").textContent === "Codex app-server version is unsupported.",
+  );
+
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(server.sessionCreateCount, 0);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+  assert.equal(transcriptText(), "");
+});
+
 test("turn failed notification clears active turn controls", async () => {
   const server = installSidePanelHarness();
   await importFreshSidePanel();
@@ -678,6 +700,10 @@ function nextTick() {
 class FakeSidekickServer {
   constructor({
     closeBeforeSendResponseNumbers = new Set(),
+    codexReadiness = {
+      available: true,
+      version: "codex-fake",
+    },
     deferMessageCreatedNumbers = new Set(),
     failAfterPersistSendNumbers = new Set(),
     failSendNumbers = new Set(),
@@ -685,6 +711,7 @@ class FakeSidekickServer {
     sessions = {},
   } = {}) {
     this.closeBeforeSendResponseNumbers = closeBeforeSendResponseNumbers;
+    this.codexReadiness = codexReadiness;
     this.deferMessageCreatedNumbers = deferMessageCreatedNumbers;
     this.failAfterPersistSendNumbers = failAfterPersistSendNumbers;
     this.failSendNumbers = failSendNumbers;
@@ -704,7 +731,9 @@ class FakeSidekickServer {
   handle(socket, request) {
     switch (request.method) {
       case "initialize":
-        socket.receiveSuccess(request.id, {});
+        socket.receiveSuccess(request.id, {
+          codex_readiness: this.codexReadiness,
+        });
         return;
       case "session/subscribe":
         this.subscribeSessionIds.push(request.params.session_id);

@@ -33,6 +33,16 @@ export interface MessageSendResult {
   reused: boolean;
 }
 
+export interface InitializeResult {
+  codexReadiness: CodexReadiness;
+}
+
+export interface CodexReadiness {
+  available: boolean;
+  version?: string;
+  errorCode?: ErrorCode;
+}
+
 export interface SidekickMessage {
   id: string;
   sessionId: string;

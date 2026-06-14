@@ -5,6 +5,7 @@ import {
 import {
   parseAttachBrowserContextResult,
   parseIgnoredResult,
+  parseInitializeResult,
   parseMessageSendResult,
   parseSessionCreateResult,
   parseSessionGetResult,
@@ -18,6 +19,7 @@ import {
   SidekickProtocolError,
   type CaptureReason,
   type DaemonSettings,
+  type ErrorCode,
   type MessageMode,
   type MessageSendResult,
   type SidekickAttachment,
@@ -173,7 +175,7 @@ export class SidekickProtocolClient {
   }
 
   private async initialize(clientVersion: string): Promise<void> {
-    await this.request(
+    const result = await this.request(
       "initialize",
       {
         client_kind: "chrome_extension",
@@ -182,8 +184,12 @@ export class SidekickProtocolClient {
         auth_token: this.token,
         capabilities: ["browser_context", "chat_stream", "debug_export"],
       },
-      parseIgnoredResult,
+      parseInitializeResult,
     );
+    if (!result.codexReadiness.available) {
+      const code = result.codexReadiness.errorCode ?? "codex_app_server_unavailable";
+      throw new SidekickProtocolError(code, codexReadinessErrorMessage(code));
+    }
   }
 
   private request<T>(
@@ -295,6 +301,21 @@ export class SidekickProtocolClient {
       kind: "connection_lost",
       message: error.message,
     });
+  }
+}
+
+function codexReadinessErrorMessage(code: ErrorCode): string {
+  switch (code) {
+    case "codex_not_found":
+      return "Codex CLI was not found.";
+    case "codex_not_logged_in":
+      return "Codex is not logged in.";
+    case "unsupported_codex_version":
+      return "Codex app-server version is unsupported.";
+    case "codex_app_server_unavailable":
+      return "Codex app-server is unavailable.";
+    default:
+      return "Codex app-server is unavailable.";
   }
 }
 

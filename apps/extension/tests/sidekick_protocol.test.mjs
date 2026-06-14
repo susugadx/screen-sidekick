@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   SidekickProtocolClient,
   buildDaemonWebSocketUrl,
+  parseInitializeResult,
   parseSidekickNotification,
   parseWireMessageText,
 } from "../dist/sidekick_protocol.js";
@@ -43,6 +44,24 @@ test("parses JSON-RPC protocol errors with stable codes", () => {
   assert.equal(message.id, "request-1");
   assert.equal(message.error.code, "unauthorized");
   assert.equal(message.error.retryable, false);
+});
+
+test("parses initialize result codex readiness", () => {
+  const result = parseInitializeResult({
+    codex_readiness: {
+      available: false,
+      version: "codex-fake 1.0.0",
+      error_code: "unsupported_codex_version",
+    },
+  });
+
+  assert.deepEqual(result, {
+    codexReadiness: {
+      available: false,
+      version: "codex-fake 1.0.0",
+      errorCode: "unsupported_codex_version",
+    },
+  });
 });
 
 test("parses turn delta notification and ignores invalid params", () => {
@@ -139,6 +158,34 @@ test("connect closes websocket when initialize is rejected", async () => {
   }
 });
 
+test("connect rejects and closes websocket when codex readiness is unavailable", async () => {
+  const server = new UnavailableInitializeServer();
+  const PreviousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
+    constructor(url) {
+      super(url, server);
+    }
+  };
+  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
+  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
+  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+
+  try {
+    await assert.rejects(
+      () =>
+        SidekickProtocolClient.connect(
+          { url: "http://127.0.0.1:43001", token: "pairing-token" },
+          "test",
+        ),
+      /Codex app-server version is unsupported/,
+    );
+    assert.equal(server.socket.closeCount, 1);
+    assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
+  } finally {
+    globalThis.WebSocket = PreviousWebSocket;
+  }
+});
+
 test("dispatches connection lost once for unexpected socket close or error", async () => {
   const first = await connectProtocolClient(new AcceptingServer());
   const firstNotifications = [];
@@ -207,7 +254,7 @@ class AcceptingServer {
 
   handle(socket, request) {
     if (request.method === "initialize") {
-      socket.receiveSuccess(request.id, {});
+      socket.receiveSuccess(request.id, readyInitializeResult());
       return;
     }
     socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
@@ -224,6 +271,32 @@ class RejectingInitializeServer {
     }
     socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
   }
+}
+
+class UnavailableInitializeServer {
+  socket = null;
+
+  handle(socket, request) {
+    if (request.method === "initialize") {
+      socket.receiveSuccess(request.id, {
+        codex_readiness: {
+          available: false,
+          error_code: "unsupported_codex_version",
+        },
+      });
+      return;
+    }
+    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
+function readyInitializeResult() {
+  return {
+    codex_readiness: {
+      available: true,
+      version: "codex-fake",
+    },
+  };
 }
 
 class ProtocolFakeWebSocket {

@@ -1,13 +1,19 @@
 export { SidekickProtocolClient, buildDaemonWebSocketUrl } from "./sidekick_protocol/client.js";
-export { parseSidekickNotification, parseWireMessageText } from "./sidekick_protocol/parser.js";
+export {
+  parseInitializeResult,
+  parseSidekickNotification,
+  parseWireMessageText,
+} from "./sidekick_protocol/parser.js";
 export {
   SIDEKICK_PROTOCOL_VERSION,
   SidekickProtocolError,
 } from "./sidekick_protocol/types.js";
 export type {
   CaptureReason,
+  CodexReadiness,
   DaemonSettings,
   ErrorCode,
+  InitializeResult,
   MessageMode,
   MessageRole,
   MessageSendResult,

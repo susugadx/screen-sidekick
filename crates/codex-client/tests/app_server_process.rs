@@ -41,7 +41,8 @@ async fn stdio_client_restarts_after_startup_timeout() {
         temp_dir.path(),
         &fake_hanging_then_success_codex_script(&count_path),
     );
-    let client = StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(10));
+    let client =
+        StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(500));
 
     let first = match client.start_turn(start_request("first")).await {
         Ok(_) => panic!("first process succeeded unexpectedly"),
@@ -66,7 +67,8 @@ async fn stdio_client_reaps_process_after_startup_timeout() {
     let pid_path = temp_dir.path().join("pid");
     let script_path =
         write_fake_codex_script(temp_dir.path(), &fake_hanging_codex_script(&pid_path));
-    let client = StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(10));
+    let client =
+        StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(500));
 
     let error = match client.start_turn(start_request("first")).await {
         Ok(_) => panic!("hanging process succeeded unexpectedly"),
@@ -215,6 +217,136 @@ async fn stdio_client_classifies_unresumable_thread_resume_errors() {
     }
 }
 
+#[tokio::test]
+async fn readiness_initializes_app_server_before_reporting_available() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let log_path = temp_dir.path().join("requests.log");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_readiness_success_codex_script(&count_path, &log_path),
+    );
+    let client = StdioCodexClient::new(script_path);
+
+    let readiness = client.readiness().await;
+
+    assert!(readiness.available);
+    assert_eq!(readiness.version.as_deref(), Some("codex-fake 1.0.0"));
+    assert_eq!(readiness.error, None);
+    assert_eq!(read_spawn_count(&count_path), 1);
+    assert_eq!(
+        wait_for_request_log(&log_path, 2),
+        ["1 initialize", "1 initialized"]
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_unsupported_when_version_succeeds_but_app_server_eofs() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_readiness_eof_codex_script(&count_path),
+    );
+    let client = StdioCodexClient::new(script_path);
+
+    let readiness = client.readiness().await;
+
+    assert!(!readiness.available);
+    assert_eq!(readiness.version.as_deref(), Some("codex-fake 1.0.0"));
+    assert_eq!(
+        readiness.error,
+        Some(CodexClientErrorKind::UnsupportedVersion)
+    );
+    assert_eq!(read_spawn_count(&count_path), 1);
+}
+
+#[tokio::test]
+async fn readiness_reports_unsupported_when_initialize_times_out() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_readiness_hanging_codex_script(&count_path),
+    );
+    let client =
+        StdioCodexClient::new_with_startup_timeout(script_path, Duration::from_millis(500));
+
+    let readiness = client.readiness().await;
+
+    assert!(!readiness.available);
+    assert_eq!(readiness.version.as_deref(), Some("codex-fake 1.0.0"));
+    assert_eq!(
+        readiness.error,
+        Some(CodexClientErrorKind::UnsupportedVersion)
+    );
+    assert_eq!(read_spawn_count(&count_path), 1);
+}
+
+#[tokio::test]
+async fn readiness_probe_success_is_reused_for_first_turn() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let log_path = temp_dir.path().join("requests.log");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_readiness_success_codex_script(&count_path, &log_path),
+    );
+    let client = StdioCodexClient::new(script_path);
+
+    let readiness = client.readiness().await;
+    let outcome = client
+        .start_turn(start_request("first"))
+        .await
+        .expect("first turn uses initialized probe process");
+
+    assert!(readiness.available);
+    assert_eq!(outcome.codex_thread_id, "thread_1");
+    assert_eq!(outcome.codex_turn_id.as_deref(), Some("turn_1"));
+    assert_eq!(read_spawn_count(&count_path), 1);
+    assert_eq!(
+        read_request_log(&log_path),
+        [
+            "1 initialize",
+            "1 initialized",
+            "1 thread/start",
+            "1 turn/start",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_ready_while_initialized_stdout_is_streaming() {
+    let temp_dir = tempfile::tempdir().expect("temp dir is created");
+    let count_path = temp_dir.path().join("spawn-count");
+    let script_path = write_fake_codex_script(
+        temp_dir.path(),
+        &fake_holding_stream_codex_script(&count_path),
+    );
+    let client = StdioCodexClient::new(script_path);
+
+    let mut events = client
+        .start_turn(start_request("streaming"))
+        .await
+        .expect("turn starts and loans stdout to stream reader")
+        .events;
+    let readiness = client.readiness().await;
+    let stream_error = events
+        .next()
+        .await
+        .expect("stream emits EOF error")
+        .expect_err("EOF is reported as an error");
+
+    assert!(readiness.available);
+    assert_eq!(readiness.version.as_deref(), Some("codex-fake 1.0.0"));
+    assert_eq!(readiness.error, None);
+    assert_eq!(
+        stream_error.kind,
+        CodexClientErrorKind::AppServerUnavailable
+    );
+    assert_eq!(read_spawn_count(&count_path), 1);
+}
+
 fn fake_codex_script(count_path: &Path, first_exits_immediately: bool) -> String {
     let first_exit = if first_exits_immediately {
         r#"
@@ -252,6 +384,125 @@ done
 "#,
         count_path.display(),
         first_exit
+    )
+}
+
+fn fake_readiness_success_codex_script(count_path: &Path, log_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-fake 1.0.0\n'
+  exit 0
+fi
+count_file="{}"
+log_file="{}"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s initialize\n' "$count" >> "$log_file"
+      printf '{{"id":"%s","result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"initialized"'*)
+      printf '%s initialized\n' "$count" >> "$log_file"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '%s thread/start\n' "$count" >> "$log_file"
+      printf '{{"id":"%s","result":{{"thread":{{"id":"thread_%s"}}}}}}\n' "$id" "$count"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '%s turn/start\n' "$count" >> "$log_file"
+      printf '{{"id":"%s","result":{{"turn":{{"id":"turn_%s"}}}}}}\n' "$id" "$count"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        count_path.display(),
+        log_path.display()
+    )
+}
+
+fn fake_readiness_eof_codex_script(count_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-fake 1.0.0\n'
+  exit 0
+fi
+count_file="{}"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+exit 0
+"#,
+        count_path.display()
+    )
+}
+
+fn fake_readiness_hanging_codex_script(count_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-fake 1.0.0\n'
+  exit 0
+fi
+count_file="{}"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r _line; do
+  :
+done
+"#,
+        count_path.display()
+    )
+}
+
+fn fake_holding_stream_codex_script(count_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-fake 1.0.0\n'
+  exit 0
+fi
+count_file="{}"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"id":"%s","result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"id":"%s","result":{{"thread":{{"id":"thread_%s"}}}}}}\n' "$id" "$count"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"id":"%s","result":{{"turn":{{"id":"turn_%s"}}}}}}\n' "$id" "$count"
+      sleep 1
+      exit 0
+      ;;
+  esac
+done
+"#,
+        count_path.display()
     )
 }
 
@@ -406,6 +657,7 @@ fn write_fake_codex_script(temp_dir: &Path, script: &str) -> PathBuf {
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&script_path, permissions).expect("script is executable");
+    std::thread::sleep(Duration::from_millis(20));
     script_path
 }
 
@@ -422,6 +674,19 @@ fn read_request_log(log_path: &Path) -> Vec<String> {
         .lines()
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn wait_for_request_log(log_path: &Path, expected_len: usize) -> Vec<String> {
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(log_path) {
+            let lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+            if lines.len() >= expected_len {
+                return lines;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    read_request_log(log_path)
 }
 
 #[cfg(target_os = "linux")]

@@ -108,6 +108,36 @@ async fn websocket_initialize_advertises_turn_cancel_for_supported_codex_client(
 }
 
 #[tokio::test]
+async fn websocket_initialize_and_status_get_report_failed_codex_readiness() {
+    let (_runtime, status, _store, _codex) =
+        start_test_daemon_failing_start(CodexClientError::new(
+            CodexClientErrorKind::UnsupportedVersion,
+            "Codex app-server version is unsupported.",
+        ));
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+
+    let init_result = send_request(
+        &mut socket,
+        "init",
+        method::INITIALIZE,
+        initialize_params(&status.token),
+    )
+    .await;
+    assert_eq!(init_result["codex_readiness"]["available"], json!(false));
+    assert_eq!(
+        init_result["codex_readiness"]["error_code"],
+        json!("unsupported_codex_version")
+    );
+
+    let status_result = send_request(&mut socket, "status", method::STATUS_GET, json!({})).await;
+    assert_eq!(status_result["codex_readiness"]["available"], json!(false));
+    assert_eq!(
+        status_result["codex_readiness"]["error_code"],
+        json!("unsupported_codex_version")
+    );
+}
+
+#[tokio::test]
 async fn legacy_capture_rejects_missing_bearer_token() {
     let app = build_daemon_router(test_state(vec![]));
     let request = Request::builder()

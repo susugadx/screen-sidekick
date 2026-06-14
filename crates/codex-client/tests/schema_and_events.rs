@@ -113,6 +113,18 @@ fn unsupported_server_request_is_protocol_error_not_unknown_event() {
 }
 
 #[test]
+fn numeric_id_server_request_is_protocol_error_not_unknown_event() {
+    let error = fixture_events_from_jsonl(
+        r#"{"id":42,"method":"item/commandExecution/requestApproval","params":{"turnId":"turn_123"}}"#,
+    )
+    .expect_err("numeric id server request is unsupported");
+
+    assert!(error
+        .message
+        .contains("Codex app-server requested unsupported client method"));
+}
+
+#[test]
 fn turn_completed_in_progress_status_is_protocol_error() {
     let error = fixture_events_from_jsonl(
         r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[],"status":"inProgress"}}}"#,
