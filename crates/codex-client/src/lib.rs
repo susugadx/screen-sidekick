@@ -70,8 +70,13 @@ pub enum CodexEvent {
         turn_id: String,
         delta: String,
     },
+    FinalAssistantMessage {
+        turn_id: String,
+        text: String,
+    },
     Completed {
         turn_id: String,
+        final_assistant_text: Option<String>,
     },
     Failed {
         turn_id: Option<String>,
@@ -778,6 +783,7 @@ fn classify_notification(
             delta: required_string(&notification.params, "delta", "agent message delta")?
                 .to_owned(),
         })),
+        "item/completed" => map_item_completed(&notification.params),
         "turn/completed" => map_turn_completed(&notification.params),
         "error" => map_error_notification(&notification.params),
         method => Ok(MappedCodexNotification::Emit(CodexEvent::Unknown {
@@ -805,6 +811,7 @@ fn map_turn_completed(params: &Value) -> Result<MappedCodexNotification, CodexCl
     match status {
         "completed" => Ok(MappedCodexNotification::Emit(CodexEvent::Completed {
             turn_id,
+            final_assistant_text: final_assistant_text_from_turn_items(turn),
         })),
         "failed" => Ok(MappedCodexNotification::Emit(CodexEvent::Failed {
             turn_id: Some(turn_id),
@@ -827,6 +834,28 @@ fn map_turn_completed(params: &Value) -> Result<MappedCodexNotification, CodexCl
             "turn/completed carried unknown status {other}"
         ))),
     }
+}
+
+fn map_item_completed(params: &Value) -> Result<MappedCodexNotification, CodexClientError> {
+    let turn_id = required_string(params, "turnId", "item/completed")?.to_owned();
+    let Some(item) = params.get("item") else {
+        return Err(CodexClientError::protocol(
+            "item/completed did not include item",
+        ));
+    };
+    let Some(candidate) = agent_message_text_candidate(item) else {
+        return Ok(MappedCodexNotification::Ignore);
+    };
+    let text = match candidate {
+        AgentMessageTextCandidate::FinalAnswer(text)
+        | AgentMessageTextCandidate::LegacyFallback(text) => text,
+    };
+    Ok(MappedCodexNotification::Emit(
+        CodexEvent::FinalAssistantMessage {
+            turn_id,
+            text: text.to_owned(),
+        },
+    ))
 }
 
 fn map_error_notification(params: &Value) -> Result<MappedCodexNotification, CodexClientError> {
@@ -872,15 +901,77 @@ fn notification_turn_id(notification: &WireNotification) -> Option<&str> {
 
 fn event_is_terminal_for_active_turn(event: &CodexEvent, active_turn_id: &str) -> bool {
     match event {
-        CodexEvent::Completed { turn_id } => turn_id == active_turn_id,
+        CodexEvent::Completed { turn_id, .. } => turn_id == active_turn_id,
         CodexEvent::Failed {
             turn_id: Some(turn_id),
             ..
         } => turn_id == active_turn_id,
         CodexEvent::TurnStarted { .. }
         | CodexEvent::Delta { .. }
+        | CodexEvent::FinalAssistantMessage { .. }
         | CodexEvent::Failed { turn_id: None, .. }
         | CodexEvent::Unknown { .. } => false,
+    }
+}
+
+fn final_assistant_text_from_turn_items(turn: &Value) -> Option<String> {
+    if !turn_items_are_authoritative(turn) {
+        return None;
+    }
+
+    let items = turn.get("items").and_then(Value::as_array)?;
+
+    if let Some(text) = items.iter().rev().find_map(|item| {
+        if let Some(AgentMessageTextCandidate::FinalAnswer(text)) =
+            agent_message_text_candidate(item)
+        {
+            Some(text)
+        } else {
+            None
+        }
+    }) {
+        return Some(text.to_owned());
+    }
+
+    items
+        .iter()
+        .rev()
+        .find_map(|item| {
+            if let Some(AgentMessageTextCandidate::LegacyFallback(text)) =
+                agent_message_text_candidate(item)
+            {
+                Some(text)
+            } else {
+                None
+            }
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn turn_items_are_authoritative(turn: &Value) -> bool {
+    match turn.get("itemsView") {
+        None => true,
+        Some(Value::String(items_view)) => items_view == "full",
+        Some(_) => false,
+    }
+}
+
+enum AgentMessageTextCandidate<'a> {
+    FinalAnswer(&'a str),
+    LegacyFallback(&'a str),
+}
+
+fn agent_message_text_candidate(item: &Value) -> Option<AgentMessageTextCandidate<'_>> {
+    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
+        return None;
+    }
+    let text = item.get("text").and_then(Value::as_str)?;
+    match item.get("phase") {
+        Some(Value::String(phase)) if phase == "final_answer" => {
+            Some(AgentMessageTextCandidate::FinalAnswer(text))
+        }
+        Some(Value::Null) | None => Some(AgentMessageTextCandidate::LegacyFallback(text)),
+        Some(_) => None,
     }
 }
 
@@ -1240,9 +1331,16 @@ mod tests {
 
         match completion {
             TurnStreamCompletion::Reusable {
-                terminal_event: Some(CodexEvent::Completed { turn_id }),
+                terminal_event:
+                    Some(CodexEvent::Completed {
+                        turn_id,
+                        final_assistant_text,
+                    }),
                 ..
-            } => assert_eq!(turn_id, "turn_active"),
+            } => {
+                assert_eq!(turn_id, "turn_active");
+                assert_eq!(final_assistant_text, None);
+            }
             _ => panic!("unexpected stream completion"),
         }
         assert!(matches!(

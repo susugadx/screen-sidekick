@@ -191,6 +191,7 @@ async fn websocket_chat_flow_streams_turn_and_sends_only_sanitized_context_to_co
         },
         CodexEvent::Completed {
             turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
         },
     ];
     let (_runtime, status, store, codex) = start_test_daemon(events);
@@ -269,6 +270,13 @@ async fn websocket_chat_flow_streams_turn_and_sends_only_sanitized_context_to_co
     assert!(notification_text.contains(notification::TURN_DELTA));
     assert!(notification_text.contains("Use the sanitized browser context."));
     assert_no_raw_secret_values(&notification_text);
+    let session_state = store.get_session(&session_id).expect("session loads");
+    let assistant = session_state
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("assistant message is persisted");
+    assert_eq!(assistant.text, "Use the sanitized browser context.");
 
     let request = codex
         .last_request()
@@ -295,6 +303,7 @@ async fn websocket_unknown_codex_event_does_not_emit_error_notification() {
         },
         CodexEvent::Completed {
             turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
         },
     ];
     let (_runtime, status, _store, _codex) = start_test_daemon(events);
@@ -330,6 +339,61 @@ async fn websocket_unknown_codex_event_does_not_emit_error_notification() {
 }
 
 #[tokio::test]
+async fn websocket_chat_flow_persists_final_agent_message_text_over_delta_buffer() {
+    let events = vec![
+        CodexEvent::Delta {
+            turn_id: "fake_turn".to_owned(),
+            delta: "stale partial".to_owned(),
+        },
+        CodexEvent::FinalAssistantMessage {
+            turn_id: "fake_turn".to_owned(),
+            text: "Final authoritative answer".to_owned(),
+        },
+        CodexEvent::Completed {
+            turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
+        },
+    ];
+    let (_runtime, status, store, _codex) = start_test_daemon(events);
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+
+    let _send_result = send_request(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Continue",
+            "idempotency_key": "final-agent-message",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    let notifications = read_notifications_until(&mut socket, notification::TURN_COMPLETED).await;
+    let created = notifications
+        .iter()
+        .find(|value| {
+            value.get("method").and_then(Value::as_str) == Some(notification::MESSAGE_CREATED)
+                && value["params"]["message"]["role"] == json!("assistant")
+        })
+        .expect("assistant message is broadcast");
+
+    assert_eq!(
+        created["params"]["message"]["text"],
+        json!("Final authoritative answer")
+    );
+    let session_state = store.get_session(&session_id).expect("session loads");
+    let assistant = session_state
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("assistant message is persisted");
+    assert_eq!(assistant.text, "Final authoritative answer");
+}
+
+#[tokio::test]
 async fn websocket_closes_lagged_subscribers_to_force_recovery() {
     let mut events = (0..64)
         .map(|index| CodexEvent::Delta {
@@ -339,6 +403,7 @@ async fn websocket_closes_lagged_subscribers_to_force_recovery() {
         .collect::<Vec<_>>();
     events.push(CodexEvent::Completed {
         turn_id: "fake_turn".to_owned(),
+        final_assistant_text: None,
     });
     let (_runtime, status, store, _codex) = start_test_daemon_with_options(
         events,
@@ -775,6 +840,7 @@ async fn websocket_codex_start_failure_emits_turn_failed_and_clears_active_turn(
 async fn websocket_stale_codex_thread_link_is_cleared_and_retried_once() {
     let events = vec![CodexEvent::Completed {
         turn_id: "fake_turn".to_owned(),
+        final_assistant_text: None,
     }];
     let (_runtime, status, store, codex) = start_test_daemon_failing_once_then_success(
         CodexClientError::new(CodexClientErrorKind::ThreadNotFound, "thread not found"),
@@ -1069,6 +1135,7 @@ async fn daemon_startup_recovers_persisted_active_turn_before_message_send() {
     let codex = Arc::new(RecordingCodexClient::new(
         vec![CodexEvent::Completed {
             turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
         }],
         false,
     ));
@@ -1268,6 +1335,7 @@ async fn websocket_turn_cancel_ignores_late_completed_stream_after_cancel() {
     late_events
         .send(Ok(CodexEvent::Completed {
             turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
         }))
         .expect("late event is delivered");
 
@@ -1294,6 +1362,7 @@ async fn websocket_turn_cancel_rejects_completed_turn_without_rewriting_transcri
         },
         CodexEvent::Completed {
             turn_id: "fake_turn".to_owned(),
+            final_assistant_text: None,
         },
     ];
     let (_runtime, status, store, codex) = start_test_daemon_with_support(events, true);
@@ -1421,6 +1490,7 @@ async fn websocket_message_send_rejects_repo_assisted_mode_until_workspace_is_wi
 async fn websocket_message_send_idempotent_retry_does_not_duplicate_work() {
     let events = vec![CodexEvent::Completed {
         turn_id: "fake_turn".to_owned(),
+        final_assistant_text: None,
     }];
     let (_runtime, status, store, codex) = start_test_daemon(events);
     let mut socket = connect_to_daemon(&status.ws_url).await;
@@ -1477,6 +1547,7 @@ async fn websocket_message_send_idempotent_retry_does_not_duplicate_work() {
 async fn websocket_message_send_idempotency_uses_defaulted_params_canonically() {
     let events = vec![CodexEvent::Completed {
         turn_id: "fake_turn".to_owned(),
+        final_assistant_text: None,
     }];
     let (_runtime, status, store, codex) = start_test_daemon(events);
     let mut socket = connect_to_daemon(&status.ws_url).await;

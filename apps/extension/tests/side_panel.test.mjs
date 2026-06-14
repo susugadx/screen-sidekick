@@ -329,6 +329,75 @@ test("stored active chat recovery failure re-enables ask controls", async () => 
   assert.equal(element("status").textContent, "Session recovery failed.");
 });
 
+test("recovery keeps save enabled and ignores delayed stale snapshots after settings change", async () => {
+  const server = installSidePanelHarness({
+    deferCloseEvents: true,
+    deferSessionGetNumbers: new Set([1]),
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions("Old recovery question"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(element("ask").disabled, true);
+  assert.equal(element("message-input").disabled, true);
+  assert.equal(element("save-bridge").disabled, false);
+
+  element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  assert.equal(transcriptText(), "");
+
+  server.releaseDeferredSessionGetResponses();
+  await nextTick();
+
+  assert.equal(element("status").textContent, "Saved");
+  assert.equal(transcriptText(), "");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("save-bridge").disabled, false);
+
+  server.releaseDeferredCloseEvents();
+  await nextTick();
+
+  assert.equal(element("status").textContent, "Saved");
+});
+
+test("hung recovery keeps save available to clear active chat state", async () => {
+  const server = installSidePanelHarness({
+    deferSessionGetNumbers: new Set([1]),
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions("Hung recovery question"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(element("ask").disabled, true);
+  assert.equal(element("message-input").disabled, true);
+  assert.equal(element("save-bridge").disabled, false);
+  assert.equal(transcriptText().includes("Hung recovery question"), false);
+
+  element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  assert.equal(transcriptText(), "");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("save-bridge").disabled, false);
+});
+
 test("stored active chat with a different token is not recovered", async () => {
   const server = installSidePanelHarness({
     storage: activeChatStorage(scopedActiveChatMarker({ daemonToken: "old-token" })),
@@ -500,6 +569,21 @@ test("saving different daemon settings disconnects old socket before stale error
   assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
   assert.equal(element("status").textContent, "Saved");
   assert.equal(transcriptText(), "");
+});
+
+test("malformed send response rejects ask and re-enables controls", async () => {
+  const server = installSidePanelHarness({
+    malformedSendResponseNumbers: new Set([1]),
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Malformed response question");
+  await waitFor(() => element("status").textContent === "Daemon message shape is invalid");
+
+  assert.equal(server.sendCount, 1);
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("message-input").value, "Malformed response question");
 });
 
 test("saving a different pairing token clears stale session state before next ask", async () => {
@@ -822,20 +906,28 @@ class FakeSidekickServer {
       available: true,
       version: "codex-fake",
     },
+    deferCloseEvents = false,
+    deferSessionGetNumbers = new Set(),
     deferMessageCreatedNumbers = new Set(),
     failAfterPersistSendNumbers = new Set(),
     failSendNumbers = new Set(),
     failSessionGetNumbers = new Set(),
+    malformedSendResponseNumbers = new Set(),
     sessions = {},
   } = {}) {
     this.closeBeforePersistSendNumbers = closeBeforePersistSendNumbers;
     this.closeBeforeSendResponseNumbers = closeBeforeSendResponseNumbers;
     this.codexReadiness = codexReadiness;
+    this.deferCloseEvents = deferCloseEvents;
+    this.deferSessionGetNumbers = deferSessionGetNumbers;
     this.deferMessageCreatedNumbers = deferMessageCreatedNumbers;
     this.failAfterPersistSendNumbers = failAfterPersistSendNumbers;
     this.failSendNumbers = failSendNumbers;
     this.failSessionGetNumbers = failSessionGetNumbers;
+    this.malformedSendResponseNumbers = malformedSendResponseNumbers;
     this.sessions = new Map(Object.entries(sessions));
+    this.deferredCloseEvents = [];
+    this.deferredSessionGetResponses = [];
     this.sendCount = 0;
     this.attachCount = 0;
     this.sessionCreateCount = 0;
@@ -878,22 +970,30 @@ class FakeSidekickServer {
         return;
       case "session/get":
         this.sessionGetCount += 1;
-        if (this.failSessionGetNumbers.has(this.sessionGetCount)) {
-          socket.receiveFailure(request.id, "internal_error", "Session recovery failed.");
-          return;
-        }
         {
-          const snapshot = this.sessions.get(request.params.session_id);
-          if (!snapshot) {
-            socket.receiveFailure(request.id, "session_not_found", "Session was not found.");
+          const sessionGetNumber = this.sessionGetCount;
+          const respond = () => {
+            if (this.failSessionGetNumbers.has(sessionGetNumber)) {
+              socket.receiveFailure(request.id, "internal_error", "Session recovery failed.");
+              return;
+            }
+            const snapshot = this.sessions.get(request.params.session_id);
+            if (!snapshot) {
+              socket.receiveFailure(request.id, "session_not_found", "Session was not found.");
+              return;
+            }
+            socket.receiveSuccess(request.id, {
+              session: snapshot.session,
+              messages: snapshot.messages,
+              attachments: snapshot.attachments,
+              active_turn: snapshot.active_turn,
+            });
+          };
+          if (this.deferSessionGetNumbers.has(sessionGetNumber)) {
+            this.deferredSessionGetResponses.push(respond);
             return;
           }
-          socket.receiveSuccess(request.id, {
-            session: snapshot.session,
-            messages: snapshot.messages,
-            attachments: snapshot.attachments,
-            active_turn: snapshot.active_turn,
-          });
+          respond();
         }
         return;
       case "context/attach_browser":
@@ -954,6 +1054,16 @@ class FakeSidekickServer {
             socket.close();
             return;
           }
+          if (this.malformedSendResponseNumbers.has(this.sendCount)) {
+            socket.receive({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: {
+                code: "invalid_request",
+              },
+            });
+            return;
+          }
           socket.receiveSuccess(request.id, {
             message_id: messageId,
             turn_id: turnId,
@@ -986,6 +1096,20 @@ class FakeSidekickServer {
     this.sessions.set(sessionId, snapshot);
     return snapshot;
   }
+
+  releaseDeferredSessionGetResponses() {
+    const responses = this.deferredSessionGetResponses.splice(0);
+    for (const respond of responses) {
+      respond();
+    }
+  }
+
+  releaseDeferredCloseEvents() {
+    const events = this.deferredCloseEvents.splice(0);
+    for (const emitClose of events) {
+      emitClose();
+    }
+  }
 }
 
 class FakeWebSocket {
@@ -1015,7 +1139,14 @@ class FakeWebSocket {
 
   close() {
     this.readyState = FakeWebSocket.CLOSED;
-    this.emit("close", {});
+    const emitClose = () => {
+      this.emit("close", {});
+    };
+    if (this.server.deferCloseEvents) {
+      this.server.deferredCloseEvents.push(emitClose);
+      return;
+    }
+    emitClose();
   }
 
   send(text) {

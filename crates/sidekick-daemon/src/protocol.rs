@@ -602,7 +602,8 @@ fn spawn_turn_stream(
     mut events: screen_sidekick_codex_client::CodexEventStream,
 ) {
     tokio::spawn(async move {
-        let mut assistant_text = String::new();
+        let mut assistant_delta_text = String::new();
+        let mut final_assistant_text: Option<String> = None;
         while let Some(event) = events.next().await {
             match event {
                 Ok(CodexEvent::TurnStarted { .. }) => {}
@@ -615,7 +616,7 @@ fn spawn_turn_stream(
                             return;
                         }
                     }
-                    assistant_text.push_str(&delta);
+                    assistant_delta_text.push_str(&delta);
                     broadcast(
                         &state.events,
                         notification::TURN_DELTA,
@@ -626,8 +627,28 @@ fn spawn_turn_stream(
                         }),
                     );
                 }
-                Ok(CodexEvent::Completed { .. }) => {
-                    match state.store.complete_turn(&local_turn_id, &assistant_text) {
+                Ok(CodexEvent::FinalAssistantMessage { text, .. }) => {
+                    match state.store.turn_is_active(&local_turn_id) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(error) => {
+                            broadcast_error(&state.events, session_error(error));
+                            return;
+                        }
+                    }
+                    final_assistant_text = Some(text);
+                }
+                Ok(CodexEvent::Completed {
+                    final_assistant_text: completed_assistant_text,
+                    ..
+                }) => {
+                    if completed_assistant_text.is_some() {
+                        final_assistant_text = completed_assistant_text;
+                    }
+                    let assistant_text = final_assistant_text
+                        .as_deref()
+                        .unwrap_or(&assistant_delta_text);
+                    match state.store.complete_turn(&local_turn_id, assistant_text) {
                         Ok((turn, message)) => {
                             broadcast(
                                 &state.events,

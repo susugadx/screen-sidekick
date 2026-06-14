@@ -30,8 +30,191 @@ fn event_fixture_maps_to_handwritten_subset() {
     ));
     assert!(matches!(
         events.get(2),
-        Some(CodexEvent::Completed { turn_id }) if turn_id == "turn_123"
+        Some(CodexEvent::Completed {
+            turn_id,
+            final_assistant_text,
+        }) if turn_id == "turn_123" && final_assistant_text.is_none()
     ));
+}
+
+#[test]
+fn item_completed_agent_message_maps_to_final_assistant_message() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"item/completed","params":{"threadId":"thread_123","turnId":"turn_123","completedAtMs":1,"item":{"id":"item_1","type":"agentMessage","text":"Final answer"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::FinalAssistantMessage {
+            turn_id: "turn_123".to_owned(),
+            text: "Final answer".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn item_completed_final_answer_agent_message_maps_to_final_assistant_message() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"item/completed","params":{"threadId":"thread_123","turnId":"turn_123","completedAtMs":1,"item":{"id":"item_1","type":"agentMessage","phase":"final_answer","text":"Final answer"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::FinalAssistantMessage {
+            turn_id: "turn_123".to_owned(),
+            text: "Final answer".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn item_completed_commentary_agent_message_is_not_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"item/completed","params":{"threadId":"thread_123","turnId":"turn_123","completedAtMs":1,"item":{"id":"item_1","type":"agentMessage","phase":"commentary","text":"Progress update"}}}"#,
+    )
+    .expect("events parse");
+
+    assert!(events.is_empty());
+}
+
+#[test]
+fn turn_completed_without_items_view_uses_legacy_full_items_default_for_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[{"id":"plan_1","type":"plan","text":"Do not store this"},{"id":"item_1","type":"agentMessage","text":"Final answer"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: Some("Final answer".to_owned())
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_full_items_view_supplies_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":"full","items":[{"id":"plan_1","type":"plan","text":"Do not store this"},{"id":"item_1","type":"agentMessage","phase":"final_answer","text":"Final answer"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: Some("Final answer".to_owned())
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_summary_items_view_does_not_supply_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":"summary","items":[{"id":"summary_final","type":"agentMessage","phase":"final_answer","text":"Partial summary should not win"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_not_loaded_items_view_does_not_supply_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":"notLoaded","items":[{"id":"summary_final","type":"agentMessage","phase":"final_answer","text":"Partial summary should not win"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_unknown_items_view_does_not_supply_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":"futurePartialView","items":[{"id":"summary_final","type":"agentMessage","phase":"final_answer","text":"Future partial payload should not win"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_non_string_items_view_does_not_supply_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":true,"items":[{"id":"summary_final","type":"agentMessage","phase":"final_answer","text":"Malformed view should not win"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_prefers_final_answer_over_later_commentary() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","itemsView":"full","items":[{"id":"legacy_1","type":"agentMessage","text":"Legacy fallback"},{"id":"final_1","type":"agentMessage","phase":"final_answer","text":"Final answer"},{"id":"commentary_1","type":"agentMessage","phase":"commentary","text":"Progress update"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: Some("Final answer".to_owned())
+        }]
+    );
+}
+
+#[test]
+fn turn_completed_commentary_only_does_not_supply_final_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"turn/completed","params":{"threadId":"thread_123","turn":{"id":"turn_123","items":[{"id":"commentary_1","type":"agentMessage","phase":"commentary","text":"Progress update"}],"status":"completed"}}}"#,
+    )
+    .expect("events parse");
+
+    assert_eq!(
+        events,
+        vec![CodexEvent::Completed {
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
+        }]
+    );
+}
+
+#[test]
+fn item_completed_non_agent_message_is_not_assistant_text() {
+    let events = fixture_events_from_jsonl(
+        r#"{"method":"item/completed","params":{"threadId":"thread_123","turnId":"turn_123","completedAtMs":1,"item":{"id":"plan_1","type":"plan","text":"Plan text"}}}"#,
+    )
+    .expect("events parse");
+
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -115,7 +298,8 @@ fn retryable_error_notification_is_non_terminal() {
     assert_eq!(
         events,
         vec![CodexEvent::Completed {
-            turn_id: "turn_123".to_owned()
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
         }]
     );
 }
@@ -133,7 +317,8 @@ fn retryable_unauthorized_error_notification_is_non_terminal() {
     assert_eq!(
         events,
         vec![CodexEvent::Completed {
-            turn_id: "turn_123".to_owned()
+            turn_id: "turn_123".to_owned(),
+            final_assistant_text: None
         }]
     );
 }

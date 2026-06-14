@@ -62,6 +62,7 @@ let unsubscribeProtocolNotifications: (() => void) | null = null;
 let activeSessionId: string | null = null;
 let activeSessionDaemonUrl: string | null = null;
 let activeSessionDaemonToken: string | null = null;
+let activeChatGeneration = 0;
 let activeTurnId: string | null = null;
 let subscribedSessionId: string | null = null;
 let requestInFlight = false;
@@ -77,6 +78,13 @@ type PendingSubmittedQuestion = {
 };
 
 let pendingSubmittedQuestion: PendingSubmittedQuestion | null = null;
+
+type ActiveChatRecoveryGuard = {
+  generation: number;
+  sessionId: string;
+  daemonUrl: string;
+  daemonToken: string;
+};
 
 const elements = {
   bridgeForm: requireElement("bridge-form", HTMLFormElement),
@@ -342,6 +350,7 @@ async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<v
   activeSessionId = marker.sessionId;
   activeSessionDaemonUrl = marker.daemonUrl;
   activeSessionDaemonToken = marker.daemonToken;
+  const guard = beginSessionRecovery(settings, marker.sessionId);
   if (marker.activeTurnId) {
     setActiveTurnId(marker.activeTurnId);
     setStatus("Reconnecting to daemon");
@@ -351,8 +360,11 @@ async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<v
 
   try {
     const client = await ensureProtocolClient(settings);
-    await recoverSessionSnapshot(client, settings, marker.sessionId);
+    await recoverSessionSnapshot(client, guard);
   } catch (error) {
+    if (!isActiveChatRecoveryCurrent(guard)) {
+      return;
+    }
     handleSessionRecoveryError(error, "Session recovery failed");
   }
 }
@@ -363,29 +375,61 @@ async function recoverActiveSessionAfterConnectionLoss(fallbackMessage: string):
     return;
   }
 
+  let guard: ActiveChatRecoveryGuard | null = null;
   try {
     const settings = readDaemonSettingsFromInputs();
+    guard = beginSessionRecovery(settings, sessionId);
     const client = await ensureProtocolClient(settings);
-    await recoverSessionSnapshot(client, settings, sessionId);
+    await recoverSessionSnapshot(client, guard);
   } catch (error) {
+    if (guard && !isActiveChatRecoveryCurrent(guard)) {
+      return;
+    }
     handleSessionRecoveryError(error, fallbackMessage);
   }
 }
 
 async function recoverSessionSnapshot(
   client: SidekickProtocolClient,
-  settings: DaemonSettings,
-  sessionId: string,
+  guard: ActiveChatRecoveryGuard,
 ): Promise<void> {
-  await client.subscribeSession(sessionId);
-  subscribedSessionId = sessionId;
-  const snapshot = await client.getSession(sessionId);
+  await client.subscribeSession(guard.sessionId);
+  const snapshot = await client.getSession(guard.sessionId);
+  if (!isActiveChatRecoveryCurrent(guard)) {
+    return;
+  }
+  if (snapshot.session.id !== guard.sessionId) {
+    throw new Error("Daemon session response did not match requested session");
+  }
+  subscribedSessionId = guard.sessionId;
   activeSessionId = snapshot.session.id;
-  activeSessionDaemonUrl = settings.url;
-  activeSessionDaemonToken = settings.token;
+  activeSessionDaemonUrl = guard.daemonUrl;
+  activeSessionDaemonToken = guard.daemonToken;
   renderSessionSnapshot(snapshot);
   setSessionRecoveryRequired(false);
   void persistActiveChatMarker();
+}
+
+function beginSessionRecovery(
+  settings: DaemonSettings,
+  sessionId: string,
+): ActiveChatRecoveryGuard {
+  setSessionRecoveryRequired(true);
+  return {
+    generation: activeChatGeneration,
+    sessionId,
+    daemonUrl: settings.url,
+    daemonToken: settings.token,
+  };
+}
+
+function isActiveChatRecoveryCurrent(guard: ActiveChatRecoveryGuard): boolean {
+  return (
+    activeChatGeneration === guard.generation &&
+    activeSessionId === guard.sessionId &&
+    activeSessionDaemonUrl === guard.daemonUrl &&
+    activeSessionDaemonToken === guard.daemonToken
+  );
 }
 
 function renderSessionSnapshot(snapshot: SidekickSessionSnapshot): void {
@@ -531,6 +575,7 @@ function handleSessionRecoveryError(error: unknown, fallbackMessage: string): vo
 }
 
 function clearActiveChatState(): void {
+  activeChatGeneration += 1;
   activeSessionId = null;
   activeSessionDaemonUrl = null;
   activeSessionDaemonToken = null;

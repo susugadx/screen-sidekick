@@ -241,9 +241,14 @@ export class SidekickProtocolClient {
 
     const parsed = parseWireMessageText(data);
     if (!parsed) {
+      const error = new SidekickProtocolError(
+        "invalid_request",
+        "Daemon message shape is invalid",
+      );
+      this.failPending(error);
       this.dispatchNotification({
         kind: "error",
-        error: new SidekickProtocolError("invalid_request", "Daemon message shape is invalid"),
+        error,
       });
       return;
     }

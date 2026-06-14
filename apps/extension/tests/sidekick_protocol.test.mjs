@@ -186,6 +186,56 @@ test("connect rejects and closes websocket when codex readiness is unavailable",
   }
 });
 
+test("connect rejects and closes websocket when initialize response shape is invalid", async () => {
+  const server = new MalformedInitializeServer();
+  const PreviousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
+    constructor(url) {
+      super(url, server);
+    }
+  };
+  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
+  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
+  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+
+  try {
+    await assert.rejects(
+      () =>
+        SidekickProtocolClient.connect(
+          { url: "http://127.0.0.1:43001", token: "pairing-token" },
+          "test",
+        ),
+      /Daemon message shape is invalid/,
+    );
+    assert.equal(server.socket.closeCount, 1);
+    assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
+  } finally {
+    globalThis.WebSocket = PreviousWebSocket;
+  }
+});
+
+test("malformed daemon message rejects pending request without closing socket", async () => {
+  const { client, server } = await connectProtocolClient(new MalformedSessionGetServer());
+  const notifications = [];
+  client.onNotification((notification) => notifications.push(notification));
+
+  await assert.rejects(
+    () => client.getSession("sess_1"),
+    /Daemon message shape is invalid/,
+  );
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].kind, "error");
+  assert.equal(notifications[0].error.code, "invalid_request");
+  assert.equal(server.socket.readyState, ProtocolFakeWebSocket.OPEN);
+
+  const session = await client.createSession("After malformed response");
+  assert.deepEqual(session, {
+    id: "sess_after_malformed",
+    title: "After malformed response",
+  });
+});
+
 test("dispatches connection lost once for unexpected socket close or error", async () => {
   const first = await connectProtocolClient(new AcceptingServer());
   const firstNotifications = [];
@@ -287,6 +337,55 @@ class UnavailableInitializeServer {
       return;
     }
     socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
+class MalformedInitializeServer {
+  socket = null;
+
+  handle(socket, request) {
+    if (request.method === "initialize") {
+      socket.receive({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: {
+          code: "invalid_request",
+        },
+      });
+      return;
+    }
+    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
+class MalformedSessionGetServer {
+  socket = null;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, readyInitializeResult());
+        return;
+      case "session/get":
+        socket.receive({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: {
+            code: "invalid_request",
+          },
+        });
+        return;
+      case "session/create":
+        socket.receiveSuccess(request.id, {
+          session: {
+            id: "sess_after_malformed",
+            title: request.params.title,
+          },
+        });
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
   }
 }
 
