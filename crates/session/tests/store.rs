@@ -237,6 +237,41 @@ fn unsupported_version_failure_round_trips_through_turn_and_idempotency() {
 }
 
 #[test]
+fn safety_review_failure_round_trips_through_turn_and_idempotency() {
+    let store = SessionStore::in_memory().expect("store opens");
+    let session = store.create_session(Some("Test")).expect("session created");
+    let request = BeginTurn {
+        session_id: session.id,
+        user_text: "hello".to_owned(),
+        attachment_ids: Vec::new(),
+        idempotency_key: "same-key".to_owned(),
+        request_hash: "same-hash".to_owned(),
+    };
+    let first = store.begin_turn(request.clone()).expect("turn begins");
+    store
+        .fail_turn(
+            &first.turn_id,
+            ErrorCode::SafetyReviewFailed,
+            Some("context_load"),
+        )
+        .expect("turn fails");
+
+    let failed = store.get_turn(&first.turn_id).expect("turn loads");
+    let retry = store.begin_turn(request);
+
+    assert_eq!(
+        failed.error.as_ref().map(|error| error.code),
+        Some(ErrorCode::SafetyReviewFailed)
+    );
+    assert!(matches!(
+        retry,
+        Err(SessionStoreError::IdempotencyFailed(
+            ErrorCode::SafetyReviewFailed
+        ))
+    ));
+}
+
+#[test]
 fn clear_codex_thread_link_only_removes_expected_thread() {
     let store = SessionStore::in_memory().expect("store opens");
     let session = store.create_session(Some("Test")).expect("session created");

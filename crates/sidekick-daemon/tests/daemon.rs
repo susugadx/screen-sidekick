@@ -21,14 +21,15 @@ use screen_sidekick_codex_client::{
     CodexClientError, CodexClientErrorKind, CodexEvent, CodexEventStream, CodexReadiness,
     CodexTurnClient, StartTurnOutcome, StartTurnRequest,
 };
-use screen_sidekick_session::{BeginTurn, SessionStore};
+use screen_sidekick_session::{BeginTurn, CreateAttachment, SessionStore};
 use screen_sidekick_sidekick_daemon::{
     build_daemon_router, DaemonOptions, DaemonRuntime, DaemonState, MAX_ATTACHMENT_BYTES,
     MAX_CAPTURE_BODY_BYTES,
 };
 use screen_sidekick_sidekick_protocol::{
-    method, notification, ErrorCode, JsonRpcFailure, JsonRpcRequest, JsonRpcResponse,
-    JsonRpcSuccess, MessageRole, ProtocolError, SIDEKICK_PROTOCOL_VERSION,
+    method, notification, AttachmentSourceType, ErrorCode, JsonRpcFailure, JsonRpcRequest,
+    JsonRpcResponse, JsonRpcSuccess, MessageRole, ProtocolError, SafetyStatus,
+    SIDEKICK_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -833,6 +834,117 @@ async fn websocket_codex_start_failure_emits_turn_failed_and_clears_active_turn(
     assert_eq!(retry_error.code, ErrorCode::CodexNotFound);
     assert_eq!(retry_error.message, "Previous message/send attempt failed.");
     assert!(read_notification_with_timeout(&mut socket).await.is_none());
+    assert_eq!(codex.start_count(), 1);
+}
+
+#[tokio::test]
+async fn websocket_context_load_failure_fails_turn_and_clears_active_turn() {
+    let (_runtime, status, store, codex) = start_test_daemon(vec![]);
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+    let attachment = store
+        .create_attachment(CreateAttachment {
+            session_id: session_id.clone(),
+            message_id: None,
+            source_type: AttachmentSourceType::BrowserTab,
+            summary: "https://example.test".to_owned(),
+            sanitized_context_json: "{\"page\":{\"title\":\"safe\"}}".to_owned(),
+            safety_review_json: "{not-json".to_owned(),
+            source_metadata_json: "{\"capture_id\":\"cap_1\"}".to_owned(),
+            safety_status: SafetyStatus::Clean,
+            debug_available: false,
+        })
+        .expect("attachment is seeded");
+    let attachment_id = attachment.id.clone();
+
+    let (error, notifications) = send_request_expect_error_collecting_notifications_until(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Use the attached context",
+            "idempotency_key": "context-load-failure",
+            "attachment_ids": [attachment_id.clone()],
+            "mode": "ask_only"
+        }),
+        notification::TURN_FAILED,
+    )
+    .await;
+
+    assert_eq!(error.code, ErrorCode::SafetyReviewFailed);
+    assert_eq!(error.message, "Stored safety review is invalid.");
+    assert!(notifications.iter().any(|value| {
+        value.get("method").and_then(Value::as_str) == Some(notification::MESSAGE_CREATED)
+    }));
+    let failed = notifications
+        .iter()
+        .find(|value| {
+            value.get("method").and_then(Value::as_str) == Some(notification::TURN_FAILED)
+        })
+        .expect("turn failed notification is emitted");
+    assert_eq!(failed["params"]["session_id"], json!(session_id));
+    assert_eq!(failed["params"]["turn"]["session_id"], json!(session_id));
+    assert_eq!(failed["params"]["turn"]["status"], json!("failed"));
+    assert_eq!(
+        failed["params"]["turn"]["error"]["code"],
+        json!("safety_review_failed")
+    );
+    assert_eq!(
+        failed["params"]["message"],
+        json!("Stored safety review is invalid.")
+    );
+
+    let turn_id = failed["params"]["turn"]["id"]
+        .as_str()
+        .expect("turn id is present");
+    let stored_turn = store.get_turn(turn_id).expect("turn loads");
+    assert_eq!(
+        stored_turn.status,
+        screen_sidekick_sidekick_protocol::TurnStatus::Failed
+    );
+    assert_eq!(
+        stored_turn.error.as_ref().map(|error| &error.code),
+        Some(&ErrorCode::SafetyReviewFailed)
+    );
+    let session_state = store.get_session(&session_id).expect("session loads");
+    assert!(session_state.active_turn.is_none());
+    assert!(session_state
+        .messages
+        .iter()
+        .all(|message| message.role != MessageRole::Assistant));
+
+    let retry_error = send_request_expect_error(
+        &mut socket,
+        "send-retry",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Use the attached context",
+            "idempotency_key": "context-load-failure",
+            "attachment_ids": [attachment_id],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    assert_eq!(retry_error.code, ErrorCode::SafetyReviewFailed);
+    assert_eq!(retry_error.message, "Previous message/send attempt failed.");
+    assert!(read_notification_with_timeout(&mut socket).await.is_none());
+
+    let next_turn = send_request(
+        &mut socket,
+        "send-next",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Next turn is not blocked",
+            "idempotency_key": "after-context-load-failure",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    assert_eq!(next_turn["reused"], json!(false));
     assert_eq!(codex.start_count(), 1);
 }
 

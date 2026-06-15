@@ -291,7 +291,19 @@ async fn handle_message_send(
         );
     }
 
-    let context_text = load_context_text(&state.store, &params.attachment_ids)?;
+    let context_text = match load_context_text(&state.store, &params.attachment_ids) {
+        Ok(context_text) => context_text,
+        Err(error) => {
+            fail_starting_turn(
+                state,
+                &turn.turn_id,
+                error.code,
+                "context_load",
+                error.message.clone(),
+            );
+            return Err(error);
+        }
+    };
     let existing_thread_id = state
         .store
         .codex_thread_id(&params.session_id)

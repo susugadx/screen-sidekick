@@ -91,6 +91,7 @@ pub(crate) fn error_code_to_str(code: ErrorCode) -> &'static str {
         ErrorCode::CodexNotFound => "codex_not_found",
         ErrorCode::UnsupportedCodexVersion => "unsupported_codex_version",
         ErrorCode::TurnCancelUnsupported => "turn_cancel_unsupported",
+        ErrorCode::SafetyReviewFailed => "safety_review_failed",
         _ => "internal_error",
     }
 }
@@ -158,6 +159,7 @@ pub(crate) fn str_to_error_code(value: &str) -> Option<ErrorCode> {
         "codex_not_found" => Some(ErrorCode::CodexNotFound),
         "unsupported_codex_version" => Some(ErrorCode::UnsupportedCodexVersion),
         "turn_cancel_unsupported" => Some(ErrorCode::TurnCancelUnsupported),
+        "safety_review_failed" => Some(ErrorCode::SafetyReviewFailed),
         "internal_error" => Some(ErrorCode::InternalError),
         _ => None,
     }
