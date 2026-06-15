@@ -145,8 +145,11 @@ async function saveDaemonSettings(): Promise<void> {
   const settings = readDaemonSettingsFromInputs();
   await chrome.storage.session.set({ [STORAGE_KEY]: settings });
   await chrome.storage.session.remove(LEGACY_STORAGE_KEY);
-  if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
+
+  if (protocolClient && !protocolClientMatchesSavedSettings(protocolClient, settings)) {
     disconnectProtocolClient();
+  }
+  if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
     clearActiveChatState();
     await clearActiveChatMarker();
   }
@@ -166,9 +169,9 @@ async function askCodex(): Promise<void> {
   let pendingQuestion: PendingSubmittedQuestion | null = null;
   try {
     const settings = readDaemonSettingsFromInputs();
+    const context = await captureActiveTabContext();
     const client = await ensureProtocolClient(settings);
     const sessionId = await ensureActiveSession(client, settings);
-    const context = await captureActiveTabContext();
     const attachment = await client.attachBrowserContext(sessionId, context, "message_send");
     pendingQuestion = { sessionId, text: question };
     pendingSubmittedQuestion = pendingQuestion;
@@ -378,7 +381,10 @@ async function recoverActiveSessionAfterConnectionLoss(fallbackMessage: string):
 
   let guard: ActiveChatRecoveryGuard | null = null;
   try {
-    const settings = readDaemonSettingsFromInputs();
+    const settings = activeDaemonSettings();
+    if (!settings) {
+      throw new Error(fallbackMessage);
+    }
     guard = beginSessionRecovery(settings, sessionId);
     const client = await ensureProtocolClient(settings);
     await recoverSessionSnapshot(client, guard);
@@ -502,6 +508,17 @@ function disconnectProtocolClient(): void {
   client?.close();
 }
 
+function protocolClientMatchesSavedSettings(
+  client: SidekickProtocolClient,
+  settings: DaemonSettings,
+): boolean {
+  try {
+    return client.matches(settings);
+  } catch {
+    return false;
+  }
+}
+
 function recordPendingSubmittedQuestionPersistence(
   pendingQuestion: PendingSubmittedQuestion,
   messageId: string,
@@ -592,6 +609,16 @@ function hasActiveDaemonIdentity(): boolean {
 
 function activeDaemonIdentityMatches(settings: DaemonSettings): boolean {
   return activeSessionDaemonUrl === settings.url && activeSessionDaemonToken === settings.token;
+}
+
+function activeDaemonSettings(): DaemonSettings | null {
+  if (!activeSessionDaemonUrl || !activeSessionDaemonToken) {
+    return null;
+  }
+  return {
+    url: activeSessionDaemonUrl,
+    token: activeSessionDaemonToken,
+  };
 }
 
 function shouldRecoverActiveSessionOnConnectionLoss(): boolean {

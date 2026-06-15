@@ -84,7 +84,7 @@ test("failed send renders persisted user message without clearing draft from tex
   assert.equal(element("status").textContent, "Codex start failed.");
 });
 
-test("codex unavailable initialize stops ask before capture or message send", async () => {
+test("codex unavailable initialize stops ask before session or message send", async () => {
   const server = installSidePanelHarness({
     codexReadiness: {
       available: false,
@@ -103,6 +103,63 @@ test("codex unavailable initialize stops ask before capture or message send", as
   assert.equal(server.sessionCreateCount, 0);
   assert.equal(server.attachCount, 0);
   assert.equal(server.sendCount, 0);
+  assert.equal(transcriptText(), "");
+});
+
+test("ask requests host permission before daemon websocket or session create", async () => {
+  const server = installSidePanelHarness();
+  const permissionSessionCreateCounts = [];
+  let executeScriptCount = 0;
+  chrome.scripting.executeScript = async () => {
+    executeScriptCount += 1;
+    if (executeScriptCount === 1) {
+      throw new Error("Extension manifest must request permission to access this host.");
+    }
+    return [
+      {
+        result: {
+          selectedText: "",
+          buttons: [],
+          inputs: [],
+        },
+      },
+    ];
+  };
+  chrome.permissions.request = async (details) => {
+    permissionSessionCreateCounts.push(server.sessionCreateCount);
+    assert.deepEqual(details, {
+      origins: ["https://example.test/*"],
+    });
+    return true;
+  };
+  await importFreshSidePanel();
+
+  submitMessage("Needs site access first");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.deepEqual(permissionSessionCreateCounts, [0]);
+  assert.equal(executeScriptCount, 2);
+  assert.equal(server.sessionCreateCount, 1);
+  assert.equal(server.attachCount, 1);
+});
+
+test("capture failure stops ask before daemon session side effects", async () => {
+  const server = installSidePanelHarness();
+  chrome.scripting.executeScript = async () => {
+    throw new Error("DOM capture failed before daemon I/O");
+  };
+  await importFreshSidePanel();
+
+  submitMessage("Do not create a session");
+  await waitFor(
+    () => element("status").textContent === "DOM capture failed before daemon I/O",
+  );
+
+  assert.equal(server.sockets.length, 0);
+  assert.equal(server.sessionCreateCount, 0);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+  assert.equal(element("message-input").value, "Do not create a session");
   assert.equal(transcriptText(), "");
 });
 
@@ -287,6 +344,39 @@ test("websocket close before message send response recovers session without a kn
   assert.equal(server.sessionCreateCount, 1);
   assert.deepEqual(server.attachSessionIds, ["sess_1", "sess_1"]);
   assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_1"]);
+});
+
+test("connection loss recovery uses active daemon identity instead of unsaved inputs", async () => {
+  const server = installSidePanelHarness();
+  await importFreshSidePanel();
+
+  submitMessage("Keep recovering on the original daemon");
+  await waitFor(() => server.sendCount === 1);
+  const firstSocket = server.socket;
+  element("bridge-url").value = "http://127.0.0.1:43002";
+
+  firstSocket.close();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.notEqual(server.socket, firstSocket);
+  assert.equal(server.socket.url, "ws://127.0.0.1:43001/v0/ws");
+  assert.equal(element("ask").disabled, true);
+  assert.equal(element("message-input").disabled, true);
+  assert.equal(element("status").textContent, "Asking");
+  assert.equal(transcriptText().includes("Keep recovering on the original daemon"), true);
+
+  server.socket.receiveNotification("turn/completed", {
+    session_id: "sess_1",
+    turn: {
+      id: "turn_1",
+      session_id: "sess_1",
+      status: "completed",
+    },
+  });
+  await waitFor(() => element("ask").disabled === false);
+
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("status").textContent, "Ready");
 });
 
 test("websocket close before message persistence keeps draft when restored session has same text", async () => {
@@ -596,6 +686,105 @@ test("saving different daemon settings disconnects old socket before stale error
   const firstSocket = server.socket;
 
   element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  firstSocket.emit("error", {});
+  firstSocket.receiveNotification("error", {
+    code: "internal_error",
+    message: "Old daemon error",
+  });
+  await nextTick();
+
+  assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
+  assert.equal(element("status").textContent, "Saved");
+  assert.equal(transcriptText(), "");
+});
+
+test("saving malformed daemon URL disconnects active stale socket before stale errors update UI", async () => {
+  const server = installSidePanelHarness();
+  await importFreshSidePanel();
+
+  submitMessage("Old daemon question");
+  await waitFor(() => server.sendCount === 1);
+  const firstSocket = server.socket;
+
+  element("bridge-url").value = "not a daemon url";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  firstSocket.emit("error", {});
+  firstSocket.receiveNotification("error", {
+    code: "internal_error",
+    message: "Old daemon error",
+  });
+  await nextTick();
+
+  assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
+  assert.equal(element("status").textContent, "Saved");
+  assert.equal(transcriptText(), "");
+});
+
+test("saving different daemon settings disconnects stale socket without active session", async () => {
+  const server = installSidePanelHarness({
+    failSessionCreateNumbers: new Set([1]),
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Session create will fail");
+  await waitFor(() => element("status").textContent === "Session create failed.");
+  const firstSocket = server.socket;
+
+  assert.equal(server.sessionCreateCount, 1);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+
+  element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  firstSocket.emit("error", {});
+  firstSocket.receiveNotification("error", {
+    code: "internal_error",
+    message: "Old daemon error",
+  });
+  await nextTick();
+
+  assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
+  assert.equal(element("status").textContent, "Saved");
+  assert.equal(transcriptText(), "");
+});
+
+test("saving non-loopback daemon URL disconnects stale socket without active session", async () => {
+  const server = installSidePanelHarness({
+    failSessionCreateNumbers: new Set([1]),
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Session create will fail");
+  await waitFor(() => element("status").textContent === "Session create failed.");
+  const firstSocket = server.socket;
+
+  assert.equal(server.sessionCreateCount, 1);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+
+  element("bridge-url").value = "http://localhost:43001";
   element("bridge-form").dispatchEvent(
     new window.Event("submit", {
       bubbles: true,
@@ -1064,6 +1253,7 @@ class FakeSidekickServer {
     deferMessageCreatedNumbers = new Set(),
     failAfterPersistSendNumbers = new Set(),
     failSendNumbers = new Set(),
+    failSessionCreateNumbers = new Set(),
     failSessionGetNumbers = new Set(),
     malformedSendResponseNumbers = new Set(),
     sessions = {},
@@ -1077,6 +1267,7 @@ class FakeSidekickServer {
     this.deferMessageCreatedNumbers = deferMessageCreatedNumbers;
     this.failAfterPersistSendNumbers = failAfterPersistSendNumbers;
     this.failSendNumbers = failSendNumbers;
+    this.failSessionCreateNumbers = failSessionCreateNumbers;
     this.failSessionGetNumbers = failSessionGetNumbers;
     this.malformedSendResponseNumbers = malformedSendResponseNumbers;
     this.sessions = new Map(Object.entries(sessions));
@@ -1108,6 +1299,10 @@ class FakeSidekickServer {
         return;
       case "session/create":
         this.sessionCreateCount += 1;
+        if (this.failSessionCreateNumbers.has(this.sessionCreateCount)) {
+          socket.receiveFailure(request.id, "internal_error", "Session create failed.");
+          return;
+        }
         {
           const session = {
             id: `sess_${this.sessionCreateCount}`,
