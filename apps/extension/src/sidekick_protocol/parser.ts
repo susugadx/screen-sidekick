@@ -7,6 +7,7 @@ import {
   type MessageRole,
   type MessageSendResult,
   type MessageStatus,
+  type ProtocolLimits,
   type SafetyStatus,
   type SidekickAttachment,
   type SidekickMessage,
@@ -135,10 +136,11 @@ export function parseInitializeResult(value: unknown): InitializeResult | null {
     return null;
   }
   const codexReadiness = parseCodexReadiness(value.codex_readiness);
-  if (!codexReadiness) {
+  const limits = parseProtocolLimits(value.limits);
+  if (!codexReadiness || !limits) {
     return null;
   }
-  return { codexReadiness };
+  return { codexReadiness, limits };
 }
 
 export function parseIgnoredResult(_value: unknown): Record<string, never> {
@@ -213,6 +215,21 @@ function parseCodexReadiness(value: unknown): CodexReadiness | null {
     readiness.errorCode = errorCode;
   }
   return readiness;
+}
+
+function parseProtocolLimits(value: unknown): ProtocolLimits | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const maxMessageBytes = getPositiveInteger(value, "max_message_bytes");
+  const maxAttachmentBytes = getPositiveInteger(value, "max_attachment_bytes");
+  if (maxMessageBytes === null || maxAttachmentBytes === null) {
+    return null;
+  }
+  return {
+    maxMessageBytes,
+    maxAttachmentBytes,
+  };
 }
 
 function parseTurnDeltaNotification(value: unknown): SidekickNotification | null {
@@ -471,4 +488,11 @@ function getStringAllowEmpty(record: Record<string, unknown>, key: string): stri
 function getBoolean(record: Record<string, unknown>, key: string): boolean | null {
   const value = record[key];
   return typeof value === "boolean" ? value : null;
+}
+
+function getPositiveInteger(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
 }

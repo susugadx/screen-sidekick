@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { flushMicrotasks, installManualTimers } from "./manual_timers.mjs";
 import {
   SidekickProtocolClient,
+  buildDaemonCaptureUrl,
   buildDaemonWebSocketUrl,
   parseInitializeResult,
   parseSidekickNotification,
@@ -13,6 +15,13 @@ test("builds daemon websocket URL without carrying query tokens", () => {
   const url = buildDaemonWebSocketUrl("http://127.0.0.1:43001?token=SECRET#debug");
 
   assert.equal(url.toString(), "ws://127.0.0.1:43001/v0/ws");
+  assert.equal(url.toString().includes("SECRET"), false);
+});
+
+test("builds daemon capture URL from websocket settings without carrying query tokens", () => {
+  const url = buildDaemonCaptureUrl("ws://127.0.0.1:43001?token=SECRET#debug");
+
+  assert.equal(url.toString(), "http://127.0.0.1:43001/v0/capture");
   assert.equal(url.toString().includes("SECRET"), false);
 });
 
@@ -53,6 +62,10 @@ test("parses initialize result codex readiness", () => {
       version: "codex-fake 1.0.0",
       error_code: "unsupported_codex_version",
     },
+    limits: {
+      max_message_bytes: 262144,
+      max_attachment_bytes: 131072,
+    },
   });
 
   assert.deepEqual(result, {
@@ -61,7 +74,50 @@ test("parses initialize result codex readiness", () => {
       version: "codex-fake 1.0.0",
       errorCode: "unsupported_codex_version",
     },
+    limits: {
+      maxMessageBytes: 262144,
+      maxAttachmentBytes: 131072,
+    },
   });
+});
+
+test("rejects initialize result when protocol limits are missing or invalid", () => {
+  const base = {
+    codex_readiness: {
+      available: true,
+    },
+  };
+
+  assert.equal(parseInitializeResult(base), null);
+  assert.equal(
+    parseInitializeResult({
+      ...base,
+      limits: {
+        max_message_bytes: 0,
+        max_attachment_bytes: 131072,
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    parseInitializeResult({
+      ...base,
+      limits: {
+        max_message_bytes: 262144.5,
+        max_attachment_bytes: 131072,
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    parseInitializeResult({
+      ...base,
+      limits: {
+        max_message_bytes: 262144,
+      },
+    }),
+    null,
+  );
 });
 
 test("parses turn delta notification and ignores invalid params", () => {
@@ -214,6 +270,40 @@ test("connect rejects and closes websocket when initialize response shape is inv
   }
 });
 
+test("connect times out unanswered initialize and closes websocket", async () => {
+  const server = new UnansweredInitializeServer();
+  const PreviousWebSocket = globalThis.WebSocket;
+  const timers = installManualTimers();
+  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
+    constructor(url) {
+      super(url, server);
+    }
+  };
+  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
+  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
+  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+
+  try {
+    const connectPromise = SidekickProtocolClient.connect(
+      { url: "http://127.0.0.1:43001", token: "pairing-token" },
+      "test",
+    );
+    await flushMicrotasks();
+    assert.equal(server.socket.sent[0]?.method, "initialize");
+
+    const rejected = assert.rejects(connectPromise, /Daemon request timed out/);
+    timers.fireNext();
+    await rejected;
+
+    assert.equal(server.socket.closeCount, 1);
+    assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
+    assert.equal(timers.size, 0);
+  } finally {
+    timers.restore();
+    globalThis.WebSocket = PreviousWebSocket;
+  }
+});
+
 test("malformed daemon message rejects pending request without closing socket", async () => {
   const { client, server } = await connectProtocolClient(new MalformedSessionGetServer());
   const notifications = [];
@@ -234,6 +324,88 @@ test("malformed daemon message rejects pending request without closing socket", 
     id: "sess_after_malformed",
     title: "After malformed response",
   });
+});
+
+test("session/get timeout cleans pending state and ignores late response", async () => {
+  const { client, server } = await connectProtocolClient(new HangingSessionGetServer());
+  const timers = installManualTimers();
+
+  try {
+    const sessionGetPromise = client.getSession("sess_1");
+    await flushMicrotasks();
+    assert.equal(server.hangingSessionGetId, "sidekick_extension_2");
+    assert.equal(timers.size, 1);
+
+    const rejected = assert.rejects(sessionGetPromise, /Daemon request timed out/);
+    timers.fireNext();
+    await rejected;
+
+    server.socket.receiveSuccess(server.hangingSessionGetId, {
+      session: {
+        id: "sess_1",
+        title: "Late session",
+      },
+      messages: [],
+      attachments: [],
+      active_turn: null,
+    });
+  } finally {
+    timers.restore();
+  }
+
+  const session = await client.createSession("After timeout");
+  assert.deepEqual(session, {
+    id: "sess_after_timeout",
+    title: "After timeout",
+  });
+});
+
+test("message/send waits for delayed response without local request timeout", async () => {
+  const { client, server } = await connectProtocolClient(new DelayedMessageSendServer());
+  const timers = installManualTimers();
+
+  try {
+    let settled = false;
+    const sendPromise = client
+      .sendMessage("sess_1", "Slow question", [], "ask_only")
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await flushMicrotasks();
+
+    assert.equal(server.delayedMessageSendId, "sidekick_extension_2");
+    assert.equal(timers.size, 0);
+    assert.equal(settled, false);
+
+    server.releaseMessageSend();
+    assert.deepEqual(await sendPromise, {
+      messageId: "msg_delayed",
+      turnId: "turn_delayed",
+      reused: false,
+    });
+    assert.equal(settled, true);
+  } finally {
+    timers.restore();
+  }
+});
+
+test("oversized outgoing request is rejected locally before websocket send", async () => {
+  const { client, server } = await connectProtocolClient(new SmallMessageLimitServer());
+
+  await assert.rejects(
+    () => client.sendMessage("sess_1", "x".repeat(512), [], "ask_only"),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "SidekickProtocolError");
+      assert.equal(error.code, "payload_too_large");
+      assert.equal(error.message, "Daemon request is too large for the WebSocket limit.");
+      return true;
+    },
+  );
+
+  assert.equal(server.messageSendCount, 0);
+  assert.equal(server.socket.sent.some((request) => request.method === "message/send"), false);
 });
 
 test("dispatches connection lost once for unexpected socket close or error", async () => {
@@ -333,7 +505,19 @@ class UnavailableInitializeServer {
           available: false,
           error_code: "unsupported_codex_version",
         },
+        limits: readyProtocolLimits(),
       });
+      return;
+    }
+    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
+class UnansweredInitializeServer {
+  socket = null;
+
+  handle(socket, request) {
+    if (request.method === "initialize") {
       return;
     }
     socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
@@ -355,6 +539,83 @@ class MalformedInitializeServer {
       return;
     }
     socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
+class HangingSessionGetServer {
+  socket = null;
+  hangingSessionGetId = null;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, readyInitializeResult());
+        return;
+      case "session/get":
+        this.hangingSessionGetId = request.id;
+        return;
+      case "session/create":
+        socket.receiveSuccess(request.id, {
+          session: {
+            id: "sess_after_timeout",
+            title: request.params.title,
+          },
+        });
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
+  }
+}
+
+class DelayedMessageSendServer {
+  socket = null;
+  delayedMessageSendId = null;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, readyInitializeResult());
+        return;
+      case "message/send":
+        this.delayedMessageSendId = request.id;
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
+  }
+
+  releaseMessageSend() {
+    this.socket.receiveSuccess(this.delayedMessageSendId, {
+      message_id: "msg_delayed",
+      turn_id: "turn_delayed",
+      reused: false,
+    });
+  }
+}
+
+class SmallMessageLimitServer {
+  socket = null;
+  messageSendCount = 0;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, {
+          ...readyInitializeResult(),
+          limits: {
+            max_message_bytes: 160,
+            max_attachment_bytes: 131072,
+          },
+        });
+        return;
+      case "message/send":
+        this.messageSendCount += 1;
+        socket.receiveFailure(request.id, "internal_error", "Should not be sent.");
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
   }
 }
 
@@ -395,6 +656,14 @@ function readyInitializeResult() {
       available: true,
       version: "codex-fake",
     },
+    limits: readyProtocolLimits(),
+  };
+}
+
+function readyProtocolLimits() {
+  return {
+    max_message_bytes: 262144,
+    max_attachment_bytes: 131072,
   };
 }
 

@@ -1,4 +1,8 @@
-export { SidekickProtocolClient, buildDaemonWebSocketUrl } from "./sidekick_protocol/client.js";
+export {
+  SidekickProtocolClient,
+  buildDaemonCaptureUrl,
+  buildDaemonWebSocketUrl,
+} from "./sidekick_protocol/client.js";
 export {
   parseInitializeResult,
   parseSidekickNotification,
@@ -18,6 +22,7 @@ export type {
   MessageRole,
   MessageSendResult,
   MessageStatus,
+  ProtocolLimits,
   SafetyStatus,
   SidekickAttachment,
   SidekickMessage,

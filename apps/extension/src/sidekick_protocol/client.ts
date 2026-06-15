@@ -13,6 +13,7 @@ import {
   parseWireMessageText,
 } from "./parser.js";
 import {
+  DEFAULT_MAX_REQUEST_MESSAGE_BYTES,
   JSONRPC_VERSION,
   MAX_PROTOCOL_MESSAGE_CHARS,
   SIDEKICK_PROTOCOL_VERSION,
@@ -31,9 +32,17 @@ import {
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timeoutId: number | null;
 };
 
 type NotificationHandler = (notification: SidekickNotification) => void;
+type RequestOptions = {
+  timeoutMs?: number;
+};
+
+const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TOO_LARGE_MESSAGE = "Daemon request is too large for the WebSocket limit.";
+const textEncoder = new TextEncoder();
 
 interface AttachBrowserContextRequest {
   session_id: string;
@@ -65,6 +74,7 @@ export class SidekickProtocolClient {
   private closedIntentionally = false;
   private connectionLostReported = false;
   private requestCounter = 0;
+  private maxRequestMessageBytes = DEFAULT_MAX_REQUEST_MESSAGE_BYTES;
 
   private constructor(
     private readonly socket: WebSocket,
@@ -131,11 +141,17 @@ export class SidekickProtocolClient {
       "session/subscribe",
       { session_id: sessionId },
       parseIgnoredResult,
+      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
     );
   }
 
   async getSession(sessionId: string): Promise<SidekickSessionSnapshot> {
-    return this.request("session/get", { session_id: sessionId }, parseSessionGetResult);
+    return this.request(
+      "session/get",
+      { session_id: sessionId },
+      parseSessionGetResult,
+      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
+    );
   }
 
   async attachBrowserContext(
@@ -185,7 +201,9 @@ export class SidekickProtocolClient {
         capabilities: ["browser_context", "chat_stream", "debug_export"],
       },
       parseInitializeResult,
+      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
     );
+    this.maxRequestMessageBytes = result.limits.maxMessageBytes;
     if (!result.codexReadiness.available) {
       const code = result.codexReadiness.errorCode ?? "codex_app_server_unavailable";
       throw new SidekickProtocolError(code, codexReadinessErrorMessage(code));
@@ -196,6 +214,7 @@ export class SidekickProtocolClient {
     method: string,
     params: unknown,
     parseResult: (value: unknown) => T | null,
+    options: RequestOptions = {},
   ): Promise<T> {
     if (!this.isOpen()) {
       return Promise.reject(new Error("Daemon WebSocket is not open"));
@@ -208,8 +227,24 @@ export class SidekickProtocolClient {
       method,
       params,
     };
+    const serializedRequest = JSON.stringify(request);
+    if (requestByteLength(serializedRequest) > this.maxRequestMessageBytes) {
+      return Promise.reject(
+        new SidekickProtocolError("payload_too_large", REQUEST_TOO_LARGE_MESSAGE),
+      );
+    }
 
     return new Promise<T>((resolve, reject) => {
+      let timeoutId: number | null = null;
+      if (options.timeoutMs !== undefined) {
+        timeoutId = globalThis.setTimeout(() => {
+          const pending = this.takePending(id);
+          if (!pending) {
+            return;
+          }
+          pending.reject(new Error("Daemon request timed out"));
+        }, options.timeoutMs);
+      }
       this.pending.set(id, {
         resolve: (value) => {
           const parsed = parseResult(value);
@@ -220,8 +255,17 @@ export class SidekickProtocolClient {
           resolve(parsed);
         },
         reject,
+        timeoutId,
       });
-      this.socket.send(JSON.stringify(request));
+      try {
+        this.socket.send(serializedRequest);
+      } catch (error) {
+        const pending = this.takePending(id);
+        if (!pending) {
+          return;
+        }
+        pending.reject(error instanceof Error ? error : new Error("Daemon request failed"));
+      }
     });
   }
 
@@ -267,20 +311,18 @@ export class SidekickProtocolClient {
   }
 
   private resolvePending(id: string, result: unknown): void {
-    const pending = this.pending.get(id);
+    const pending = this.takePending(id);
     if (!pending) {
       return;
     }
-    this.pending.delete(id);
     pending.resolve(result);
   }
 
-  private rejectPending(id: string, error: SidekickProtocolError): void {
-    const pending = this.pending.get(id);
+  private rejectPending(id: string, error: Error): void {
+    const pending = this.takePending(id);
     if (!pending) {
       return;
     }
-    this.pending.delete(id);
     pending.reject(error);
   }
 
@@ -291,10 +333,22 @@ export class SidekickProtocolClient {
   }
 
   private failPending(error: Error): void {
-    for (const pending of this.pending.values()) {
+    const pendingRequests = [...this.pending.values()];
+    this.pending.clear();
+    for (const pending of pendingRequests) {
+      clearPendingTimeout(pending);
       pending.reject(error);
     }
-    this.pending.clear();
+  }
+
+  private takePending(id: string): PendingRequest | null {
+    const pending = this.pending.get(id);
+    if (!pending) {
+      return null;
+    }
+    this.pending.delete(id);
+    clearPendingTimeout(pending);
+    return pending;
   }
 
   private reportConnectionLost(error: Error): void {
@@ -325,6 +379,24 @@ function codexReadinessErrorMessage(code: ErrorCode): string {
 }
 
 export function buildDaemonWebSocketUrl(rawDaemonUrl: string): URL {
+  const daemonUrl = parseLoopbackDaemonUrl(rawDaemonUrl);
+  daemonUrl.protocol = "ws:";
+  daemonUrl.pathname = "/v0/ws";
+  daemonUrl.search = "";
+  daemonUrl.hash = "";
+  return daemonUrl;
+}
+
+export function buildDaemonCaptureUrl(rawDaemonUrl: string): URL {
+  const daemonUrl = parseLoopbackDaemonUrl(rawDaemonUrl);
+  daemonUrl.protocol = "http:";
+  daemonUrl.pathname = "/v0/capture";
+  daemonUrl.search = "";
+  daemonUrl.hash = "";
+  return daemonUrl;
+}
+
+function parseLoopbackDaemonUrl(rawDaemonUrl: string): URL {
   let daemonUrl: URL;
   try {
     daemonUrl = new URL(rawDaemonUrl);
@@ -339,12 +411,17 @@ export function buildDaemonWebSocketUrl(rawDaemonUrl: string): URL {
   ) {
     throw new Error("Daemon URL must use http://127.0.0.1:<port> or ws://127.0.0.1:<port>");
   }
-
-  daemonUrl.protocol = "ws:";
-  daemonUrl.pathname = "/v0/ws";
-  daemonUrl.search = "";
-  daemonUrl.hash = "";
   return daemonUrl;
+}
+
+function requestByteLength(value: string): number {
+  return textEncoder.encode(value).byteLength;
+}
+
+function clearPendingTimeout(pending: PendingRequest): void {
+  if (pending.timeoutId !== null) {
+    globalThis.clearTimeout(pending.timeoutId);
+  }
 }
 
 function openWebSocket(url: URL): Promise<WebSocket> {

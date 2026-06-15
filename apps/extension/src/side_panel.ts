@@ -33,6 +33,7 @@ import {
 import {
   SidekickProtocolError,
   SidekickProtocolClient,
+  buildDaemonCaptureUrl,
   type DaemonSettings,
   type SidekickMessage,
   type SidekickNotification,
@@ -216,7 +217,7 @@ async function captureDebugToBridge(): Promise<void> {
 
   try {
     const settings = readDaemonSettingsFromInputs();
-    const endpoint = buildCaptureEndpoint(settings.url);
+    const endpoint = buildDaemonCaptureUrl(settings.url);
     const context = await captureActiveTabContext();
     const response = await postCapture(endpoint, settings.token, context);
     setPreviewState(elements, {
@@ -820,28 +821,6 @@ function formatDaemonRejectionStatus(status: number, body: string): string {
     return `Daemon rejected capture (${status}): ${trimmedBody}`;
   }
   return `Daemon rejected capture (${status})`;
-}
-
-function buildCaptureEndpoint(rawDaemonUrl: string): URL {
-  let daemonUrl: URL;
-  try {
-    daemonUrl = new URL(rawDaemonUrl);
-  } catch {
-    throw new Error("Daemon URL is invalid");
-  }
-
-  if (
-    daemonUrl.protocol !== "http:" ||
-    daemonUrl.hostname !== "127.0.0.1" ||
-    daemonUrl.port.length === 0
-  ) {
-    throw new Error("Daemon URL must use http://127.0.0.1:<port>");
-  }
-
-  daemonUrl.pathname = "/v0/capture";
-  daemonUrl.search = "";
-  daemonUrl.hash = "";
-  return daemonUrl;
 }
 
 async function loadDaemonSettings(): Promise<DaemonSettings | null> {

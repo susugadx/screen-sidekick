@@ -1,6 +1,7 @@
 export const SIDEKICK_PROTOCOL_VERSION = "sidekick.protocol.v0";
 export const JSONRPC_VERSION = "2.0";
 export const MAX_PROTOCOL_MESSAGE_CHARS = 512 * 1024;
+export const DEFAULT_MAX_REQUEST_MESSAGE_BYTES = 256 * 1024;
 
 export interface DaemonSettings {
   url: string;
@@ -35,6 +36,12 @@ export interface MessageSendResult {
 
 export interface InitializeResult {
   codexReadiness: CodexReadiness;
+  limits: ProtocolLimits;
+}
+
+export interface ProtocolLimits {
+  maxMessageBytes: number;
+  maxAttachmentBytes: number;
 }
 
 export interface CodexReadiness {

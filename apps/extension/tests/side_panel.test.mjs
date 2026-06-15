@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
+import { installManualTimers, waitForMicrotasks } from "./manual_timers.mjs";
 
 let moduleCounter = 0;
 
@@ -103,6 +104,50 @@ test("codex unavailable initialize stops ask before capture or message send", as
   assert.equal(server.attachCount, 0);
   assert.equal(server.sendCount, 0);
   assert.equal(transcriptText(), "");
+});
+
+test("debug capture normalizes websocket daemon URL to http capture endpoint", async () => {
+  const previousFetch = globalThis.fetch;
+  let capturedFetch = null;
+  installSidePanelHarness({
+    storage: {
+      daemonSettings: {
+        url: "ws://127.0.0.1:43001?token=SECRET#debug",
+        token: "pairing-token",
+      },
+    },
+  });
+  globalThis.fetch = async (url, options) => {
+    capturedFetch = {
+      url: String(url),
+      method: options.method,
+      authorization: options.headers.Authorization,
+    };
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify(captureBridgeResponse());
+      },
+    };
+  };
+
+  try {
+    await importFreshSidePanel("ws://127.0.0.1:43001?token=SECRET#debug");
+
+    element("debug-capture").click();
+    await waitFor(() => element("status").textContent === "Ready");
+
+    assert.deepEqual(capturedFetch, {
+      url: "http://127.0.0.1:43001/v0/capture",
+      method: "POST",
+      authorization: "Bearer pairing-token",
+    });
+    assert.equal(element("screen-context-json").value, "{}");
+    assert.equal(element("prompt-text").value, "Prompt");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test("turn failed notification clears active turn controls", async () => {
@@ -586,6 +631,84 @@ test("malformed send response rejects ask and re-enables controls", async () => 
   assert.equal(element("message-input").value, "Malformed response question");
 });
 
+test("delayed message send response keeps ask disabled until turn completes", async () => {
+  const server = installSidePanelHarness({
+    deferSendResponseNumbers: new Set([1]),
+  });
+  await importFreshSidePanel();
+  const timers = installManualTimers();
+
+  try {
+    submitMessage("Slow question");
+    await waitForMicrotasks(() => server.sendCount === 1);
+
+    assert.equal(element("ask").disabled, true);
+    assert.equal(element("message-input").disabled, true);
+    assert.equal(element("status").textContent, "Capturing");
+    assert.equal(transcriptText().includes("Slow question"), true);
+    assert.equal(messageRows().length, 1);
+    assert.equal(timers.size, 0);
+  } finally {
+    timers.restore();
+  }
+
+  server.releaseDeferredSendResponses();
+  await waitFor(() => element("status").textContent === "Asking");
+  const activeChat = await waitForStoredActiveChat(
+    (storedActiveChat) => storedActiveChat?.activeTurnId === "turn_1",
+  );
+
+  assert.equal(activeChat.activeTurnId, "turn_1");
+  assert.equal(element("ask").disabled, true);
+  assert.equal(element("message-input").disabled, true);
+  assert.equal(messageRows().length, 2);
+
+  server.socket.receiveNotification("turn/completed", {
+    session_id: "sess_1",
+    turn: {
+      id: "turn_1",
+      session_id: "sess_1",
+      status: "completed",
+    },
+  });
+  await waitFor(() => element("ask").disabled === false);
+
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("status").textContent, "Ready");
+});
+
+test("stored active chat session get timeout releases recovery controls", async () => {
+  const server = installSidePanelHarness({
+    deferSessionGetNumbers: new Set([1]),
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions("Persisted question"),
+  });
+  const timers = installManualTimers();
+
+  try {
+    await importFreshSidePanelWithMicrotasks();
+    await waitForMicrotasks(() => server.sessionGetCount === 1);
+
+    assert.equal(element("ask").disabled, true);
+    assert.equal(element("message-input").disabled, true);
+    assert.equal(element("status").textContent, "Reconnecting to daemon");
+    assert.equal(timers.size, 1);
+
+    timers.fireNext();
+    await waitForMicrotasks(() => element("ask").disabled === false);
+
+    assert.equal(element("message-input").disabled, false);
+    assert.equal(element("status").textContent, "Daemon request timed out");
+
+    server.releaseDeferredSessionGetResponses();
+    await waitForMicrotasks(() => element("ask").disabled === false);
+    assert.equal(element("status").textContent, "Daemon request timed out");
+  } finally {
+    timers.restore();
+  }
+});
+
 test("saving a different pairing token clears stale session state before next ask", async () => {
   const server = installSidePanelHarness();
   await importFreshSidePanel();
@@ -624,9 +747,16 @@ test("saving a different pairing token clears stale session state before next as
   assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_2"]);
 });
 
-async function importFreshSidePanel() {
+async function importFreshSidePanel(expectedDaemonUrl = "http://127.0.0.1:43001") {
   await import(`../dist/side_panel.js?test=${++moduleCounter}`);
-  await waitFor(() => element("bridge-url").value === "http://127.0.0.1:43001");
+  await waitFor(() => element("bridge-url").value === expectedDaemonUrl);
+}
+
+async function importFreshSidePanelWithMicrotasks(
+  expectedDaemonUrl = "http://127.0.0.1:43001",
+) {
+  await import(`../dist/side_panel.js?test=${++moduleCounter}`);
+  await waitForMicrotasks(() => element("bridge-url").value === expectedDaemonUrl);
 }
 
 function installSidePanelHarness(options = {}) {
@@ -873,6 +1003,28 @@ function runningActiveChatSessions(userText = null) {
   };
 }
 
+function captureBridgeResponse() {
+  return {
+    schema_version: "sidekick_capture_bridge.v0.1",
+    screen_context_json: "{}",
+    prompt_text: "Prompt",
+    safety: {
+      has_danger: false,
+      warning_count: 0,
+      warnings: [],
+      masked_input_values: 0,
+      masked_secret_texts: 0,
+    },
+  };
+}
+
+function readyProtocolLimits() {
+  return {
+    max_message_bytes: 262144,
+    max_attachment_bytes: 131072,
+  };
+}
+
 async function waitFor(predicate) {
   for (let index = 0; index < 100; index += 1) {
     if (predicate()) {
@@ -908,6 +1060,7 @@ class FakeSidekickServer {
     },
     deferCloseEvents = false,
     deferSessionGetNumbers = new Set(),
+    deferSendResponseNumbers = new Set(),
     deferMessageCreatedNumbers = new Set(),
     failAfterPersistSendNumbers = new Set(),
     failSendNumbers = new Set(),
@@ -920,6 +1073,7 @@ class FakeSidekickServer {
     this.codexReadiness = codexReadiness;
     this.deferCloseEvents = deferCloseEvents;
     this.deferSessionGetNumbers = deferSessionGetNumbers;
+    this.deferSendResponseNumbers = deferSendResponseNumbers;
     this.deferMessageCreatedNumbers = deferMessageCreatedNumbers;
     this.failAfterPersistSendNumbers = failAfterPersistSendNumbers;
     this.failSendNumbers = failSendNumbers;
@@ -928,6 +1082,7 @@ class FakeSidekickServer {
     this.sessions = new Map(Object.entries(sessions));
     this.deferredCloseEvents = [];
     this.deferredSessionGetResponses = [];
+    this.deferredSendResponses = [];
     this.sendCount = 0;
     this.attachCount = 0;
     this.sessionCreateCount = 0;
@@ -944,6 +1099,7 @@ class FakeSidekickServer {
       case "initialize":
         socket.receiveSuccess(request.id, {
           codex_readiness: this.codexReadiness,
+          limits: readyProtocolLimits(),
         });
         return;
       case "session/subscribe":
@@ -1064,14 +1220,21 @@ class FakeSidekickServer {
             });
             return;
           }
-          socket.receiveSuccess(request.id, {
-            message_id: messageId,
-            turn_id: turnId,
-            reused: false,
-          });
-          if (this.deferMessageCreatedNumbers.has(this.sendCount)) {
-            setTimeout(notifyMessageCreated, 0);
+          const sendResponse = () => {
+            socket.receiveSuccess(request.id, {
+              message_id: messageId,
+              turn_id: turnId,
+              reused: false,
+            });
+            if (this.deferMessageCreatedNumbers.has(this.sendCount)) {
+              setTimeout(notifyMessageCreated, 0);
+            }
+          };
+          if (this.deferSendResponseNumbers.has(this.sendCount)) {
+            this.deferredSendResponses.push(sendResponse);
+            return;
           }
+          sendResponse();
         }
         return;
       default:
@@ -1099,6 +1262,13 @@ class FakeSidekickServer {
 
   releaseDeferredSessionGetResponses() {
     const responses = this.deferredSessionGetResponses.splice(0);
+    for (const respond of responses) {
+      respond();
+    }
+  }
+
+  releaseDeferredSendResponses() {
+    const responses = this.deferredSendResponses.splice(0);
     for (const respond of responses) {
       respond();
     }
