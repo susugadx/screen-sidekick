@@ -4,12 +4,28 @@ import test from "node:test";
 import { flushMicrotasks, installManualTimers } from "./manual_timers.mjs";
 import {
   SidekickProtocolClient,
+  SidekickProtocolError,
   buildDaemonCaptureUrl,
   buildDaemonWebSocketUrl,
+  isTerminalMessageSendReplayError,
   parseInitializeResult,
   parseSidekickNotification,
   parseWireMessageText,
 } from "../dist/sidekick_protocol.js";
+import {
+  AcceptingServer,
+  DelayedMessageSendServer,
+  HangingSessionGetServer,
+  MalformedInitializeServer,
+  MalformedSessionGetServer,
+  ProtocolFakeWebSocket,
+  RejectingInitializeServer,
+  SmallMessageLimitServer,
+  UnansweredInitializeServer,
+  UnavailableInitializeServer,
+  connectProtocolClient,
+  installProtocolWebSocket,
+} from "./support/protocol_harness.mjs";
 
 test("builds daemon websocket URL without carrying query tokens", () => {
   const url = buildDaemonWebSocketUrl("http://127.0.0.1:43001?token=SECRET#debug");
@@ -53,6 +69,28 @@ test("parses JSON-RPC protocol errors with stable codes", () => {
   assert.equal(message.id, "request-1");
   assert.equal(message.error.code, "unauthorized");
   assert.equal(message.error.retryable, false);
+});
+
+test("classifies terminal message send replay errors", () => {
+  assert.equal(
+    isTerminalMessageSendReplayError(
+      new SidekickProtocolError("codex_not_found", "Previous message/send attempt failed."),
+    ),
+    true,
+  );
+  assert.equal(
+    isTerminalMessageSendReplayError(
+      new SidekickProtocolError("invalid_params", "Previous message/send attempt was cancelled."),
+    ),
+    true,
+  );
+  assert.equal(
+    isTerminalMessageSendReplayError(
+      new SidekickProtocolError("internal_error", "Retry setup failed."),
+    ),
+    false,
+  );
+  assert.equal(isTerminalMessageSendReplayError(new Error("Previous message/send attempt failed.")), false);
 });
 
 test("parses initialize result codex readiness", () => {
@@ -188,15 +226,7 @@ test("parses turn failed notification with turn and concrete message", () => {
 
 test("connect closes websocket when initialize is rejected", async () => {
   const server = new RejectingInitializeServer();
-  const PreviousWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
-    constructor(url) {
-      super(url, server);
-    }
-  };
-  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
-  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
-  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+  const restoreWebSocket = installProtocolWebSocket(server);
 
   try {
     await assert.rejects(
@@ -210,21 +240,13 @@ test("connect closes websocket when initialize is rejected", async () => {
     assert.equal(server.socket.closeCount, 1);
     assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
   } finally {
-    globalThis.WebSocket = PreviousWebSocket;
+    restoreWebSocket();
   }
 });
 
 test("connect rejects and closes websocket when codex readiness is unavailable", async () => {
   const server = new UnavailableInitializeServer();
-  const PreviousWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
-    constructor(url) {
-      super(url, server);
-    }
-  };
-  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
-  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
-  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+  const restoreWebSocket = installProtocolWebSocket(server);
 
   try {
     await assert.rejects(
@@ -238,21 +260,13 @@ test("connect rejects and closes websocket when codex readiness is unavailable",
     assert.equal(server.socket.closeCount, 1);
     assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
   } finally {
-    globalThis.WebSocket = PreviousWebSocket;
+    restoreWebSocket();
   }
 });
 
 test("connect rejects and closes websocket when initialize response shape is invalid", async () => {
   const server = new MalformedInitializeServer();
-  const PreviousWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
-    constructor(url) {
-      super(url, server);
-    }
-  };
-  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
-  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
-  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+  const restoreWebSocket = installProtocolWebSocket(server);
 
   try {
     await assert.rejects(
@@ -266,22 +280,14 @@ test("connect rejects and closes websocket when initialize response shape is inv
     assert.equal(server.socket.closeCount, 1);
     assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
   } finally {
-    globalThis.WebSocket = PreviousWebSocket;
+    restoreWebSocket();
   }
 });
 
 test("connect times out unanswered initialize and closes websocket", async () => {
   const server = new UnansweredInitializeServer();
-  const PreviousWebSocket = globalThis.WebSocket;
   const timers = installManualTimers();
-  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
-    constructor(url) {
-      super(url, server);
-    }
-  };
-  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
-  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
-  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
+  const restoreWebSocket = installProtocolWebSocket(server);
 
   try {
     const connectPromise = SidekickProtocolClient.connect(
@@ -300,7 +306,7 @@ test("connect times out unanswered initialize and closes websocket", async () =>
     assert.equal(timers.size, 0);
   } finally {
     timers.restore();
-    globalThis.WebSocket = PreviousWebSocket;
+    restoreWebSocket();
   }
 });
 
@@ -367,7 +373,7 @@ test("message/send waits for delayed response without local request timeout", as
   try {
     let settled = false;
     const sendPromise = client
-      .sendMessage("sess_1", "Slow question", [], "ask_only")
+      .sendMessage("sess_1", "Slow question", "idem_from_caller", ["att_1"], "ask_only")
       .then((result) => {
         settled = true;
         return result;
@@ -375,6 +381,8 @@ test("message/send waits for delayed response without local request timeout", as
     await flushMicrotasks();
 
     assert.equal(server.delayedMessageSendId, "sidekick_extension_2");
+    assert.equal(server.delayedMessageSendParams.idempotency_key, "idem_from_caller");
+    assert.deepEqual(server.delayedMessageSendParams.attachment_ids, ["att_1"]);
     assert.equal(timers.size, 0);
     assert.equal(settled, false);
 
@@ -394,7 +402,7 @@ test("oversized outgoing request is rejected locally before websocket send", asy
   const { client, server } = await connectProtocolClient(new SmallMessageLimitServer());
 
   await assert.rejects(
-    () => client.sendMessage("sess_1", "x".repeat(512), [], "ask_only"),
+    () => client.sendMessage("sess_1", "x".repeat(512), "idem_large", [], "ask_only"),
     (error) => {
       assert.ok(error instanceof Error);
       assert.equal(error.name, "SidekickProtocolError");
@@ -448,295 +456,3 @@ test("does not dispatch connection lost for intentional client close", async () 
   assert.equal(server.socket.closeCount, 1);
   assert.deepEqual(notifications, []);
 });
-
-async function connectProtocolClient(server) {
-  const PreviousWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = class extends ProtocolFakeWebSocket {
-    constructor(url) {
-      super(url, server);
-    }
-  };
-  globalThis.WebSocket.CONNECTING = ProtocolFakeWebSocket.CONNECTING;
-  globalThis.WebSocket.OPEN = ProtocolFakeWebSocket.OPEN;
-  globalThis.WebSocket.CLOSED = ProtocolFakeWebSocket.CLOSED;
-
-  try {
-    const client = await SidekickProtocolClient.connect(
-      { url: "http://127.0.0.1:43001", token: "pairing-token" },
-      "test",
-    );
-    return { client, server };
-  } finally {
-    globalThis.WebSocket = PreviousWebSocket;
-  }
-}
-
-class AcceptingServer {
-  socket = null;
-
-  handle(socket, request) {
-    if (request.method === "initialize") {
-      socket.receiveSuccess(request.id, readyInitializeResult());
-      return;
-    }
-    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-  }
-}
-
-class RejectingInitializeServer {
-  socket = null;
-
-  handle(socket, request) {
-    if (request.method === "initialize") {
-      socket.receiveFailure(request.id, "unauthorized", "Pairing token is invalid.");
-      return;
-    }
-    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-  }
-}
-
-class UnavailableInitializeServer {
-  socket = null;
-
-  handle(socket, request) {
-    if (request.method === "initialize") {
-      socket.receiveSuccess(request.id, {
-        codex_readiness: {
-          available: false,
-          error_code: "unsupported_codex_version",
-        },
-        limits: readyProtocolLimits(),
-      });
-      return;
-    }
-    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-  }
-}
-
-class UnansweredInitializeServer {
-  socket = null;
-
-  handle(socket, request) {
-    if (request.method === "initialize") {
-      return;
-    }
-    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-  }
-}
-
-class MalformedInitializeServer {
-  socket = null;
-
-  handle(socket, request) {
-    if (request.method === "initialize") {
-      socket.receive({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: {
-          code: "invalid_request",
-        },
-      });
-      return;
-    }
-    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-  }
-}
-
-class HangingSessionGetServer {
-  socket = null;
-  hangingSessionGetId = null;
-
-  handle(socket, request) {
-    switch (request.method) {
-      case "initialize":
-        socket.receiveSuccess(request.id, readyInitializeResult());
-        return;
-      case "session/get":
-        this.hangingSessionGetId = request.id;
-        return;
-      case "session/create":
-        socket.receiveSuccess(request.id, {
-          session: {
-            id: "sess_after_timeout",
-            title: request.params.title,
-          },
-        });
-        return;
-      default:
-        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-    }
-  }
-}
-
-class DelayedMessageSendServer {
-  socket = null;
-  delayedMessageSendId = null;
-
-  handle(socket, request) {
-    switch (request.method) {
-      case "initialize":
-        socket.receiveSuccess(request.id, readyInitializeResult());
-        return;
-      case "message/send":
-        this.delayedMessageSendId = request.id;
-        return;
-      default:
-        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-    }
-  }
-
-  releaseMessageSend() {
-    this.socket.receiveSuccess(this.delayedMessageSendId, {
-      message_id: "msg_delayed",
-      turn_id: "turn_delayed",
-      reused: false,
-    });
-  }
-}
-
-class SmallMessageLimitServer {
-  socket = null;
-  messageSendCount = 0;
-
-  handle(socket, request) {
-    switch (request.method) {
-      case "initialize":
-        socket.receiveSuccess(request.id, {
-          ...readyInitializeResult(),
-          limits: {
-            max_message_bytes: 160,
-            max_attachment_bytes: 131072,
-          },
-        });
-        return;
-      case "message/send":
-        this.messageSendCount += 1;
-        socket.receiveFailure(request.id, "internal_error", "Should not be sent.");
-        return;
-      default:
-        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-    }
-  }
-}
-
-class MalformedSessionGetServer {
-  socket = null;
-
-  handle(socket, request) {
-    switch (request.method) {
-      case "initialize":
-        socket.receiveSuccess(request.id, readyInitializeResult());
-        return;
-      case "session/get":
-        socket.receive({
-          jsonrpc: "2.0",
-          id: request.id,
-          error: {
-            code: "invalid_request",
-          },
-        });
-        return;
-      case "session/create":
-        socket.receiveSuccess(request.id, {
-          session: {
-            id: "sess_after_malformed",
-            title: request.params.title,
-          },
-        });
-        return;
-      default:
-        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
-    }
-  }
-}
-
-function readyInitializeResult() {
-  return {
-    codex_readiness: {
-      available: true,
-      version: "codex-fake",
-    },
-    limits: readyProtocolLimits(),
-  };
-}
-
-function readyProtocolLimits() {
-  return {
-    max_message_bytes: 262144,
-    max_attachment_bytes: 131072,
-  };
-}
-
-class ProtocolFakeWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSED = 3;
-
-  constructor(url, server) {
-    this.url = String(url);
-    this.server = server;
-    this.readyState = ProtocolFakeWebSocket.CONNECTING;
-    this.listeners = new Map();
-    this.sent = [];
-    this.closeCount = 0;
-    server.socket = this;
-    queueMicrotask(() => {
-      this.readyState = ProtocolFakeWebSocket.OPEN;
-      this.emit("open", {});
-    });
-  }
-
-  addEventListener(type, listener, options = {}) {
-    const listeners = this.listeners.get(type) ?? [];
-    listeners.push({ listener, once: options.once === true });
-    this.listeners.set(type, listeners);
-  }
-
-  close() {
-    this.closeCount += 1;
-    this.readyState = ProtocolFakeWebSocket.CLOSED;
-    this.emit("close", {});
-  }
-
-  send(text) {
-    const request = JSON.parse(text);
-    this.sent.push(request);
-    this.server.handle(this, request);
-  }
-
-  receiveFailure(id, code, message) {
-    this.receive({
-      jsonrpc: "2.0",
-      id,
-      error: {
-        code,
-        message,
-      },
-    });
-  }
-
-  receiveSuccess(id, result) {
-    this.receive({
-      jsonrpc: "2.0",
-      id,
-      result,
-    });
-  }
-
-  receive(value) {
-    this.emit("message", {
-      data: JSON.stringify(value),
-    });
-  }
-
-  emit(type, event) {
-    const listeners = this.listeners.get(type) ?? [];
-    this.listeners.set(
-      type,
-      listeners.filter(({ listener, once }) => {
-        listener(event);
-        return !once;
-      }),
-    );
-  }
-}

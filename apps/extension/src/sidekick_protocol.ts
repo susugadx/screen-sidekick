@@ -2,6 +2,8 @@ export {
   SidekickProtocolClient,
   buildDaemonCaptureUrl,
   buildDaemonWebSocketUrl,
+  createMessageSendIdempotencyKey,
+  isTerminalMessageSendReplayError,
 } from "./sidekick_protocol/client.js";
 export {
   parseInitializeResult,

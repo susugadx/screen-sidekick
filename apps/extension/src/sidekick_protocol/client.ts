@@ -42,6 +42,10 @@ type RequestOptions = {
 
 const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
 const REQUEST_TOO_LARGE_MESSAGE = "Daemon request is too large for the WebSocket limit.";
+const TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES = new Set([
+  "Previous message/send attempt failed.",
+  "Previous message/send attempt was cancelled.",
+]);
 const textEncoder = new TextEncoder();
 
 interface AttachBrowserContextRequest {
@@ -176,13 +180,14 @@ export class SidekickProtocolClient {
   async sendMessage(
     sessionId: string,
     text: string,
+    idempotencyKey: string,
     attachmentIds: string[],
     mode: MessageMode,
   ): Promise<MessageSendResult> {
     const params: MessageSendRequest = {
       session_id: sessionId,
       text,
-      idempotency_key: createClientId("idem"),
+      idempotency_key: idempotencyKey,
       attachment_ids: attachmentIds,
       capture_current_context: false,
       mode,
@@ -394,6 +399,17 @@ export function buildDaemonCaptureUrl(rawDaemonUrl: string): URL {
   daemonUrl.search = "";
   daemonUrl.hash = "";
   return daemonUrl;
+}
+
+export function createMessageSendIdempotencyKey(): string {
+  return createClientId("idem");
+}
+
+export function isTerminalMessageSendReplayError(error: unknown): boolean {
+  return (
+    error instanceof SidekickProtocolError &&
+    TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES.has(error.message)
+  );
 }
 
 function parseLoopbackDaemonUrl(rawDaemonUrl: string): URL {

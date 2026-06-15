@@ -1,28 +1,3 @@
-import {
-  RAW_BROWSER_CONTEXT_SCHEMA_VERSION,
-  buildButton,
-  buildInput,
-  buildPage,
-  serializeCaptureContextForBridge,
-  type CaptureBridgeResponse,
-  type DomCapture,
-  type InputKind,
-  type RawBrowserButton,
-  type RawBrowserContext,
-  type RawBrowserInput,
-  type RawBrowserScreenshot,
-  type SafetySummary,
-  type SafetyWarning,
-} from "./capture_contract.js";
-import {
-  REOPEN_SIDEKICK_FOR_TAB_MESSAGE,
-  assertFreshCaptureGrant,
-  createCaptureGrant,
-  isMissingCaptureVisibleTabPermissionError,
-  isMissingManifestHostPermissionError,
-  type CaptureGrant,
-} from "./capture_permission.js";
-import { collectBrowserContext } from "./dom_capture.js";
 import { clearPreviewState, setPreviewState } from "./preview_state.js";
 import {
   clearActiveChatMarker,
@@ -30,34 +5,34 @@ import {
   saveActiveChatMarker,
   type ActiveChatMarker,
 } from "./side_panel_active_chat.js";
+import { formatSafetySummary, postCaptureToBridge } from "./side_panel_bridge.js";
+import { SidePanelCaptureState } from "./side_panel_capture.js";
+import {
+  loadStoredDaemonSettings,
+  parseDaemonSettings,
+  storeDaemonSettings,
+} from "./side_panel_daemon_settings.js";
+import {
+  PendingSubmittedQuestionState,
+  type PendingSubmittedQuestion,
+} from "./side_panel_pending_submission.js";
+import { SidePanelTranscriptView } from "./side_panel_transcript.js";
 import {
   SidekickProtocolError,
   SidekickProtocolClient,
-  buildDaemonCaptureUrl,
+  createMessageSendIdempotencyKey,
+  isTerminalMessageSendReplayError,
   type DaemonSettings,
+  type SafetyStatus,
   type SidekickMessage,
   type SidekickNotification,
   type SidekickSessionSnapshot,
   type SidekickTurn,
 } from "./sidekick_protocol.js";
 
-const STORAGE_KEY = "daemonSettings";
-const LEGACY_STORAGE_KEY = "bridgeSettings";
-const FETCH_TIMEOUT_MS = 10_000;
-const MAX_BRIDGE_RESPONSE_CHARS = 512 * 1024;
-const STATIC_BRIDGE_REJECTION_MESSAGES = new Set([
-  "extension Origin header is required",
-  "only chrome-extension origins are allowed",
-  "invalid CORS preflight",
-  "bearer token is required",
-  "bearer token is invalid",
-  "capture request JSON is invalid",
-  "capture request is invalid",
-  "failed to serialize capture response",
-]);
+const captureState = new SidePanelCaptureState();
+const pendingSubmittedQuestions = new PendingSubmittedQuestionState();
 
-let initialCaptureGrant: CaptureGrant | null = null;
-let initialCaptureGrantError: Error | null = null;
 let protocolClient: SidekickProtocolClient | null = null;
 let unsubscribeProtocolNotifications: (() => void) | null = null;
 let activeSessionId: string | null = null;
@@ -68,17 +43,13 @@ let activeTurnId: string | null = null;
 let subscribedSessionId: string | null = null;
 let requestInFlight = false;
 let sessionRecoveryRequired = false;
-let activeAssistantText = "";
-let activeAssistantTextElement: HTMLDivElement | null = null;
-let renderedMessageIds = new Set<string>();
-type PendingSubmittedQuestion = {
-  sessionId: string;
-  text: string;
-  persistedMessageId?: string;
-  persistedTurnId?: string;
-};
 
-let pendingSubmittedQuestion: PendingSubmittedQuestion | null = null;
+type PreparedSubmittedQuestion = {
+  client: SidekickProtocolClient;
+  sessionId: string;
+  pendingQuestion: PendingSubmittedQuestion;
+  safetyStatus?: SafetyStatus;
+};
 
 type ActiveChatRecoveryGuard = {
   generation: number;
@@ -104,16 +75,17 @@ const elements = {
   safetySummary: requireElement("safety-summary", HTMLPreElement),
   status: requireElement("status", HTMLSpanElement),
 };
+const transcriptView = new SidePanelTranscriptView(elements.transcript);
 
 void initialize();
 
 async function initialize(): Promise<void> {
-  const settings = await loadDaemonSettings();
+  const settings = await loadStoredDaemonSettings();
   if (settings) {
     elements.bridgeUrl.value = settings.url;
     elements.bridgeToken.value = settings.token;
   }
-  await initializeCaptureGrant();
+  await captureState.initializeGrant();
 
   elements.bridgeForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -143,8 +115,7 @@ async function initialize(): Promise<void> {
 
 async function saveDaemonSettings(): Promise<void> {
   const settings = readDaemonSettingsFromInputs();
-  await chrome.storage.session.set({ [STORAGE_KEY]: settings });
-  await chrome.storage.session.remove(LEGACY_STORAGE_KEY);
+  await storeDaemonSettings(settings);
 
   if (protocolClient && !protocolClientMatchesSavedSettings(protocolClient, settings)) {
     disconnectProtocolClient();
@@ -164,53 +135,137 @@ async function askCodex(): Promise<void> {
   }
 
   setRequestInFlight(true);
-  setStatus("Capturing");
 
   let pendingQuestion: PendingSubmittedQuestion | null = null;
   try {
     const settings = readDaemonSettingsFromInputs();
-    const context = await captureActiveTabContext();
-    const client = await ensureProtocolClient(settings);
-    const sessionId = await ensureActiveSession(client, settings);
-    const attachment = await client.attachBrowserContext(sessionId, context, "message_send");
-    pendingQuestion = { sessionId, text: question };
-    pendingSubmittedQuestion = pendingQuestion;
-    const sendResult = await client.sendMessage(sessionId, question, [attachment.id], "ask_only");
-    recordPendingSubmittedQuestionPersistence(
+    const submittedQuestion = await prepareSubmittedQuestion(settings, question);
+    pendingQuestion = submittedQuestion.pendingQuestion;
+    const sendResult = await submittedQuestion.client.sendMessage(
+      submittedQuestion.sessionId,
+      question,
+      pendingQuestion.idempotencyKey,
+      pendingQuestion.attachmentIds,
+      "ask_only",
+    );
+    pendingSubmittedQuestions.recordPersistedIds(
       pendingQuestion,
       sendResult.messageId,
       sendResult.turnId,
     );
-    setActiveTurnId(sendResult.turnId);
-    appendSessionMessage({
-      id: sendResult.messageId,
-      sessionId,
-      role: "user",
-      text: question,
-      status: "pending",
-      turnId: sendResult.turnId,
-    });
-    activeAssistantText = "";
-    activeAssistantTextElement = appendTranscriptMessage("assistant", "");
-    setStatus(attachment.safetyStatus === "warning" ? "Review" : "Asking");
-  } catch (error) {
-    if (
-      !sessionRecoveryRequired &&
-      pendingQuestion &&
-      pendingSubmittedQuestion === pendingQuestion
-    ) {
-      pendingSubmittedQuestion = null;
+    if (sendResult.reused) {
+      const applied = await loadAndRenderSessionSnapshot(
+        submittedQuestion.client,
+        activeChatGuard(settings, submittedQuestion.sessionId),
+        submittedQuestion.safetyStatus,
+      );
+      if (applied) {
+        clearPendingSubmittedQuestion(pendingQuestion);
+      }
+      return;
     }
-    if (sessionRecoveryRequired) {
+    renderAcceptedSubmittedQuestion(
+      submittedQuestion.sessionId,
+      question,
+      sendResult.messageId,
+      sendResult.turnId,
+      submittedQuestion.safetyStatus,
+    );
+    clearPendingSubmittedQuestion(pendingQuestion);
+  } catch (error) {
+    const recoveryRequired = sessionRecoveryRequired;
+    if (recoveryRequired && pendingQuestion) {
+      pendingSubmittedQuestions.retainForIdempotentRetry(pendingQuestion);
+    }
+    if (
+      pendingSubmittedQuestions.shouldDiscardAfterFailure(pendingQuestion, {
+        recoveryRequired,
+        terminalReplayFailure: isTerminalMessageSendReplayError(error),
+      })
+    ) {
+      pendingSubmittedQuestions.discard(pendingQuestion);
+    }
+    if (recoveryRequired) {
       setStatus("Reconnecting to daemon");
     } else {
-      activeAssistantTextElement = null;
-      activeAssistantText = "";
+      transcriptView.clearActiveAssistantReference();
       setError(error instanceof Error ? error.message : "Ask failed");
     }
   } finally {
     setRequestInFlight(false);
   }
+}
+
+async function prepareSubmittedQuestion(
+  settings: DaemonSettings,
+  question: string,
+): Promise<PreparedSubmittedQuestion> {
+  const retryQuestion = pendingSubmittedQuestions.findRetryable(
+    settings,
+    question,
+    activeSessionId,
+  );
+  if (retryQuestion) {
+    await assertPendingSubmittedQuestionCaptureScopeFresh(retryQuestion);
+    pendingSubmittedQuestions.retainForIdempotentRetry(retryQuestion);
+    setStatus("Asking");
+    const client = await ensureProtocolClient(settings);
+    const sessionId = await ensureActiveSession(client, settings);
+    return {
+      client,
+      sessionId,
+      pendingQuestion: retryQuestion,
+      safetyStatus: retryQuestion.safetyStatus,
+    };
+  }
+
+  setStatus("Capturing");
+  const capturedContext = await captureState.captureActiveTabContextWithGrant();
+  const client = await ensureProtocolClient(settings);
+  const sessionId = await ensureActiveSession(client, settings);
+  const attachment = await client.attachBrowserContext(
+    sessionId,
+    capturedContext.context,
+    "message_send",
+  );
+  const pendingQuestion: PendingSubmittedQuestion = {
+    sessionId,
+    text: question,
+    idempotencyKey: createMessageSendIdempotencyKey(),
+    attachmentIds: [attachment.id],
+    captureGrant: capturedContext.captureGrant,
+    safetyStatus: attachment.safetyStatus,
+    daemonUrl: settings.url,
+    daemonToken: settings.token,
+    retainForIdempotentRetry: false,
+  };
+  pendingSubmittedQuestions.set(pendingQuestion);
+  return {
+    client,
+    sessionId,
+    pendingQuestion,
+    safetyStatus: attachment.safetyStatus,
+  };
+}
+
+function renderAcceptedSubmittedQuestion(
+  sessionId: string,
+  question: string,
+  messageId: string,
+  turnId: string,
+  safetyStatus: SafetyStatus | undefined,
+): void {
+  setActiveTurnId(turnId);
+  appendSessionMessage({
+    id: messageId,
+    sessionId,
+    role: "user",
+    text: question,
+    status: "pending",
+    turnId,
+  });
+  transcriptView.startAssistantPlaceholder();
+  setActiveTurnProgressStatus(safetyStatus);
 }
 
 async function captureDebugToBridge(): Promise<void> {
@@ -220,9 +275,8 @@ async function captureDebugToBridge(): Promise<void> {
 
   try {
     const settings = readDaemonSettingsFromInputs();
-    const endpoint = buildDaemonCaptureUrl(settings.url);
-    const context = await captureActiveTabContext();
-    const response = await postCapture(endpoint, settings.token, context);
+    const context = await captureState.captureActiveTabContext();
+    const response = await postCaptureToBridge(settings, context);
     setPreviewState(elements, {
       screenContextJson: response.screen_context_json,
       promptText: response.prompt_text,
@@ -281,11 +335,7 @@ async function ensureActiveSession(
 function handleSidekickNotification(notification: SidekickNotification): void {
   switch (notification.kind) {
     case "turn_delta":
-      if (notification.turnId === activeTurnId && activeAssistantTextElement) {
-        activeAssistantText += notification.delta;
-        activeAssistantTextElement.textContent = activeAssistantText;
-        scrollTranscriptToEnd();
-      }
+      transcriptView.appendTurnDelta(notification.turnId, notification.delta, activeTurnId);
       return;
     case "turn_completed":
       if (notification.turn.id === activeTurnId) {
@@ -322,21 +372,17 @@ function handleSidekickNotification(notification: SidekickNotification): void {
 }
 
 function clearActiveTurn(removeEmptyAssistantPlaceholder = false): void {
-  if (
-    removeEmptyAssistantPlaceholder &&
-    activeAssistantTextElement &&
-    activeAssistantText.length === 0
-  ) {
-    activeAssistantTextElement.closest(".message")?.remove();
-  }
+  transcriptView.clearActiveAssistant(removeEmptyAssistantPlaceholder);
   setActiveTurnId(null);
-  activeAssistantTextElement = null;
-  activeAssistantText = "";
 }
 
 function handleProtocolConnectionLost(message: string): void {
   disconnectProtocolClient();
   if (shouldRecoverActiveSessionOnConnectionLoss()) {
+    const pendingQuestion = pendingSubmittedQuestions.current();
+    if (pendingQuestion) {
+      pendingSubmittedQuestions.retainForIdempotentRetry(pendingQuestion);
+    }
     setSessionRecoveryRequired(true);
     setStatus("Reconnecting to daemon");
     void recoverActiveSessionAfterConnectionLoss(message);
@@ -346,7 +392,7 @@ function handleProtocolConnectionLost(message: string): void {
 }
 
 async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<void> {
-  const marker = await loadActiveChatMarker(settings, initialCaptureGrant);
+  const marker = await loadActiveChatMarker(settings, captureState.currentGrant());
   if (!marker) {
     return;
   }
@@ -401,9 +447,21 @@ async function recoverSessionSnapshot(
   guard: ActiveChatRecoveryGuard,
 ): Promise<void> {
   await client.subscribeSession(guard.sessionId);
+  const applied = await loadAndRenderSessionSnapshot(client, guard);
+  if (!applied) {
+    return;
+  }
+  setSessionRecoveryRequired(false);
+}
+
+async function loadAndRenderSessionSnapshot(
+  client: SidekickProtocolClient,
+  guard: ActiveChatRecoveryGuard,
+  activeTurnSafetyStatus?: SafetyStatus,
+): Promise<boolean> {
   const snapshot = await client.getSession(guard.sessionId);
   if (!isActiveChatRecoveryCurrent(guard)) {
-    return;
+    return false;
   }
   if (snapshot.session.id !== guard.sessionId) {
     throw new Error("Daemon session response did not match requested session");
@@ -412,9 +470,9 @@ async function recoverSessionSnapshot(
   activeSessionId = snapshot.session.id;
   activeSessionDaemonUrl = guard.daemonUrl;
   activeSessionDaemonToken = guard.daemonToken;
-  renderSessionSnapshot(snapshot);
-  setSessionRecoveryRequired(false);
+  renderSessionSnapshot(snapshot, activeTurnSafetyStatus);
   void persistActiveChatMarker();
+  return true;
 }
 
 function beginSessionRecovery(
@@ -422,6 +480,13 @@ function beginSessionRecovery(
   sessionId: string,
 ): ActiveChatRecoveryGuard {
   setSessionRecoveryRequired(true);
+  return activeChatGuard(settings, sessionId);
+}
+
+function activeChatGuard(
+  settings: DaemonSettings,
+  sessionId: string,
+): ActiveChatRecoveryGuard {
   return {
     generation: activeChatGeneration,
     sessionId,
@@ -439,23 +504,21 @@ function isActiveChatRecoveryCurrent(guard: ActiveChatRecoveryGuard): boolean {
   );
 }
 
-function renderSessionSnapshot(snapshot: SidekickSessionSnapshot): void {
-  elements.transcript.replaceChildren();
-  renderedMessageIds = new Set();
-  activeAssistantText = "";
-  activeAssistantTextElement = null;
-
-  for (const message of snapshot.messages) {
-    appendSessionMessage(message, snapshot.activeTurn);
-  }
+function renderSessionSnapshot(
+  snapshot: SidekickSessionSnapshot,
+  activeTurnSafetyStatus?: SafetyStatus,
+): void {
+  transcriptView.renderSnapshotMessages(
+    snapshot,
+    activeTurnId,
+    isActiveTurnStatus,
+    clearPendingSubmittedQuestionIfPersisted,
+  );
 
   if (snapshot.activeTurn && isActiveTurnStatus(snapshot.activeTurn.status)) {
     setActiveTurnId(snapshot.activeTurn.id);
-    if (!activeAssistantTextElement) {
-      activeAssistantText = "";
-      activeAssistantTextElement = appendTranscriptMessage("assistant", "");
-    }
-    setStatus("Asking");
+    transcriptView.ensureAssistantPlaceholder();
+    setActiveTurnProgressStatus(activeTurnSafetyStatus);
     return;
   }
 
@@ -464,35 +527,17 @@ function renderSessionSnapshot(snapshot: SidekickSessionSnapshot): void {
 }
 
 function appendSessionMessage(message: SidekickMessage, activeTurn?: SidekickTurn): void {
-  if (renderedMessageIds.has(message.id)) {
-    return;
-  }
-  renderedMessageIds.add(message.id);
+  transcriptView.appendSessionMessage(
+    message,
+    activeTurn,
+    activeTurnId,
+    isActiveTurnStatus,
+    clearPendingSubmittedQuestionIfPersisted,
+  );
+}
 
-  if (message.role === "user") {
-    clearPendingSubmittedQuestionIfPersisted(message, activeTurn);
-    appendTranscriptMessage("user", message.text);
-    return;
-  }
-  if (message.role !== "assistant") {
-    return;
-  }
-
-  const belongsToActiveTurn =
-    (activeTurn && message.turnId === activeTurn.id && isActiveTurnStatus(activeTurn.status)) ||
-    (!activeTurn && message.turnId === activeTurnId);
-  if (belongsToActiveTurn && activeAssistantTextElement) {
-    activeAssistantText = message.text;
-    activeAssistantTextElement.textContent = activeAssistantText;
-    scrollTranscriptToEnd();
-    return;
-  }
-
-  const body = appendTranscriptMessage("assistant", message.text);
-  if (belongsToActiveTurn) {
-    activeAssistantText = message.text;
-    activeAssistantTextElement = body;
-  }
+function setActiveTurnProgressStatus(safetyStatus?: SafetyStatus): void {
+  setStatus(safetyStatus === "warning" ? "Review" : "Asking");
 }
 
 function isActiveTurnStatus(status: SidekickTurn["status"]): boolean {
@@ -519,63 +564,34 @@ function protocolClientMatchesSavedSettings(
   }
 }
 
-function recordPendingSubmittedQuestionPersistence(
+async function assertPendingSubmittedQuestionCaptureScopeFresh(
   pendingQuestion: PendingSubmittedQuestion,
-  messageId: string,
-  turnId: string,
-): void {
-  if (pendingSubmittedQuestion !== pendingQuestion) {
-    return;
+): Promise<void> {
+  try {
+    await captureState.assertGrantFresh(pendingQuestion.captureGrant);
+  } catch (error) {
+    pendingSubmittedQuestions.discard(pendingQuestion);
+    throw error;
   }
-  pendingQuestion.persistedMessageId = messageId;
-  pendingQuestion.persistedTurnId = turnId;
-  clearPendingSubmittedQuestion(pendingQuestion);
 }
 
 function clearPendingSubmittedQuestionIfPersisted(
   message: SidekickMessage,
   activeTurn?: SidekickTurn,
 ): void {
-  const pendingQuestion = pendingSubmittedQuestion;
-  if (!pendingQuestion) {
-    return;
-  }
-  if (!messageMatchesPendingSubmittedQuestion(message, pendingQuestion, activeTurn)) {
-    return;
-  }
-  clearPendingSubmittedQuestion(pendingQuestion);
-}
-
-function messageMatchesPendingSubmittedQuestion(
-  message: SidekickMessage,
-  pendingQuestion: PendingSubmittedQuestion,
-  activeTurn?: SidekickTurn,
-): boolean {
-  if (message.sessionId !== pendingQuestion.sessionId || message.text !== pendingQuestion.text) {
-    return false;
-  }
-  if (
-    pendingQuestion.persistedMessageId &&
-    message.id === pendingQuestion.persistedMessageId
-  ) {
-    return true;
-  }
-  if (pendingQuestion.persistedTurnId && message.turnId === pendingQuestion.persistedTurnId) {
-    return true;
-  }
-  return Boolean(
-    activeTurn &&
-      activeTurn.sessionId === pendingQuestion.sessionId &&
-      message.turnId === activeTurn.id,
-  );
+  const submittedText = pendingSubmittedQuestions.clearIfPersisted(message, activeTurn);
+  clearSubmittedDraftIfUnchanged(submittedText);
 }
 
 function clearPendingSubmittedQuestion(pendingQuestion: PendingSubmittedQuestion): void {
-  if (pendingSubmittedQuestion !== pendingQuestion) {
+  const submittedText = pendingSubmittedQuestions.clear(pendingQuestion);
+  clearSubmittedDraftIfUnchanged(submittedText);
+}
+
+function clearSubmittedDraftIfUnchanged(submittedText: string | null): void {
+  if (!submittedText) {
     return;
   }
-  const submittedText = pendingQuestion.text;
-  pendingSubmittedQuestion = null;
   if (elements.messageInput.value.trim() === submittedText) {
     elements.messageInput.value = "";
   }
@@ -598,7 +614,7 @@ function clearActiveChatState(): void {
   activeSessionDaemonUrl = null;
   activeSessionDaemonToken = null;
   subscribedSessionId = null;
-  pendingSubmittedQuestion = null;
+  pendingSubmittedQuestions.discardCurrent();
   clearRecoveryBlockingState();
   clearTranscript();
 }
@@ -631,239 +647,16 @@ function clearRecoveryBlockingState(): void {
 }
 
 function clearTranscript(): void {
-  elements.transcript.replaceChildren();
-  renderedMessageIds = new Set();
-  activeAssistantTextElement = null;
-  activeAssistantText = "";
-}
-
-function appendTranscriptMessage(role: "user" | "assistant", text: string): HTMLDivElement {
-  const item = document.createElement("div");
-  item.className = `message ${role}`;
-
-  const label = document.createElement("div");
-  label.className = "message-label";
-  label.textContent = role === "user" ? "You" : "Codex";
-
-  const body = document.createElement("div");
-  body.className = "message-text";
-  body.textContent = text;
-
-  item.append(label, body);
-  elements.transcript.append(item);
-  scrollTranscriptToEnd();
-  return body;
-}
-
-function scrollTranscriptToEnd(): void {
-  elements.transcript.scrollTop = elements.transcript.scrollHeight;
-}
-
-async function captureActiveTabContext(): Promise<RawBrowserContext> {
-  const tab = await getActiveTab();
-  if (!initialCaptureGrant) {
-    throw initialCaptureGrantError ?? new Error(REOPEN_SIDEKICK_FOR_TAB_MESSAGE);
-  }
-  const captureGrant = initialCaptureGrant;
-  assertFreshCaptureGrant(tab, captureGrant);
-
-  const domCapture = await captureDom(captureGrant);
-  const screenshot = await captureScreenshotMetadata(tab.windowId);
-  const context: RawBrowserContext = {
-    schema_version: RAW_BROWSER_CONTEXT_SCHEMA_VERSION,
-    buttons: domCapture.buttons,
-    inputs: domCapture.inputs,
-  };
-  const page = buildPage(nonEmptyString(tab.url), nonEmptyString(tab.title));
-  const selectedText = nonEmptyString(domCapture.selectedText);
-  if (page) {
-    context.page = page;
-  }
-  if (selectedText) {
-    context.selected_text = selectedText;
-  }
-  if (screenshot) {
-    context.screenshot = screenshot;
-  }
-
-  return context;
-}
-
-async function initializeCaptureGrant(): Promise<void> {
-  try {
-    initialCaptureGrant = createCaptureGrant(await getActiveTab());
-    initialCaptureGrantError = null;
-  } catch (error) {
-    initialCaptureGrant = null;
-    initialCaptureGrantError =
-      error instanceof Error ? error : new Error(REOPEN_SIDEKICK_FOR_TAB_MESSAGE);
-  }
-}
-
-async function getActiveTab(): Promise<chrome.tabs.Tab> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
-  if (!tab) {
-    throw new Error("Active tab is unavailable");
-  }
-  return tab;
-}
-
-async function captureDom(grant: CaptureGrant): Promise<DomCapture> {
-  try {
-    return await executeCaptureScript(grant.tabId);
-  } catch (error) {
-    if (!isMissingManifestHostPermissionError(error)) {
-      throw error;
-    }
-  }
-
-  const granted = await requestCaptureHostPermission(grant.hostPermissionPattern);
-  if (!granted) {
-    throw new Error("Site access was not granted for this page");
-  }
-  return executeCaptureScript(grant.tabId);
-}
-
-async function executeCaptureScript(tabId: number): Promise<DomCapture> {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: collectBrowserContext,
-  });
-  const firstResult = results[0]?.result;
-  const parsed = parseDomCapture(firstResult);
-  if (!parsed) {
-    throw new Error("Page context capture failed");
-  }
-  return parsed;
-}
-
-async function requestCaptureHostPermission(origin: string): Promise<boolean> {
-  try {
-    return await chrome.permissions.request({ origins: [origin] });
-  } catch {
-    throw new Error("Site access permission request failed");
-  }
-}
-
-async function captureScreenshotMetadata(
-  windowId: number | undefined,
-): Promise<RawBrowserScreenshot | undefined> {
-  let dataUrl: string;
-  try {
-    dataUrl =
-      typeof windowId === "number"
-        ? await chrome.tabs.captureVisibleTab(windowId, { format: "png" })
-        : await chrome.tabs.captureVisibleTab({ format: "png" });
-  } catch (error) {
-    if (isMissingCaptureVisibleTabPermissionError(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-
-  const dimensions = await readImageDimensions(dataUrl);
-  const format = imageFormatFromDataUrl(dataUrl);
-  const screenshot: RawBrowserScreenshot = {
-    width: dimensions.width,
-    height: dimensions.height,
-    captured_at: new Date().toISOString(),
-  };
-  if (format) {
-    screenshot.format = format;
-  }
-
-  return screenshot;
-}
-
-async function readImageDimensions(
-  dataUrl: string,
-): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => {
-      const dimensions = {
-        width: image.naturalWidth,
-        height: image.naturalHeight,
-      };
-      image.src = "";
-      resolve(dimensions);
-    };
-    image.onerror = () => {
-      image.src = "";
-      reject(new Error("Screenshot metadata capture failed"));
-    };
-    image.src = dataUrl;
-  });
-}
-
-function imageFormatFromDataUrl(dataUrl: string): string | undefined {
-  const match = /^data:image\/([a-z0-9.+-]+);base64,/i.exec(dataUrl);
-  return match?.[1]?.toLowerCase();
-}
-
-async function postCapture(
-  endpoint: URL,
-  token: string,
-  context: RawBrowserContext,
-): Promise<CaptureBridgeResponse> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-  try {
-    const body = serializeCaptureContextForBridge(context);
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body,
-      signal: controller.signal,
-    });
-    const text = await response.text();
-
-    if (text.length > MAX_BRIDGE_RESPONSE_CHARS) {
-      throw new Error("Daemon response is too large");
-    }
-
-    if (!response.ok) {
-      throw new Error(formatDaemonRejectionStatus(response.status, text));
-    }
-
-    const payload: unknown = JSON.parse(text);
-    const parsed = parseCaptureBridgeResponse(payload);
-    if (!parsed) {
-      throw new Error("Daemon response shape is invalid");
-    }
-    return parsed;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-function formatDaemonRejectionStatus(status: number, body: string): string {
-  const trimmedBody = body.trim();
-  if (STATIC_BRIDGE_REJECTION_MESSAGES.has(trimmedBody)) {
-    return `Daemon rejected capture (${status}): ${trimmedBody}`;
-  }
-  return `Daemon rejected capture (${status})`;
-}
-
-async function loadDaemonSettings(): Promise<DaemonSettings | null> {
-  const stored: Record<string, unknown> = await chrome.storage.session.get([
-    STORAGE_KEY,
-    LEGACY_STORAGE_KEY,
-  ]);
-  return parseDaemonSettings(stored[STORAGE_KEY]) ?? parseDaemonSettings(stored[LEGACY_STORAGE_KEY]);
+  transcriptView.reset();
 }
 
 async function persistActiveChatMarker(): Promise<void> {
+  const captureGrant = captureState.currentGrant();
   if (
     !activeSessionId ||
     !activeSessionDaemonUrl ||
     !activeSessionDaemonToken ||
-    !initialCaptureGrant
+    !captureGrant
   ) {
     await clearActiveChatMarker();
     return;
@@ -871,8 +664,8 @@ async function persistActiveChatMarker(): Promise<void> {
   const marker: ActiveChatMarker = {
     daemonUrl: activeSessionDaemonUrl,
     daemonToken: activeSessionDaemonToken,
-    tabId: initialCaptureGrant.tabId,
-    origin: initialCaptureGrant.origin,
+    tabId: captureGrant.tabId,
+    origin: captureGrant.origin,
     sessionId: activeSessionId,
   };
   if (activeTurnId) {
@@ -890,212 +683,6 @@ function readDaemonSettingsFromInputs(): DaemonSettings {
     throw new Error("Daemon URL and pairing token are required");
   }
   return settings;
-}
-
-function parseDaemonSettings(value: unknown): DaemonSettings | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const url = getString(value, "url");
-  const token = getString(value, "token");
-  if (!url || !token) {
-    return null;
-  }
-
-  return { url, token };
-}
-
-function parseCaptureBridgeResponse(value: unknown): CaptureBridgeResponse | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const schemaVersion = getString(value, "schema_version");
-  const screenContextJson = getString(value, "screen_context_json");
-  const promptText = getString(value, "prompt_text");
-  const safety = parseSafetySummary(value.safety);
-
-  if (!schemaVersion || !screenContextJson || !promptText || !safety) {
-    return null;
-  }
-
-  return {
-    schema_version: schemaVersion,
-    screen_context_json: screenContextJson,
-    prompt_text: promptText,
-    safety,
-  };
-}
-
-function parseSafetySummary(value: unknown): SafetySummary | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const hasDanger = getBoolean(value, "has_danger");
-  const warningCount = getNumber(value, "warning_count");
-  const maskedInputValues = getNumber(value, "masked_input_values");
-  const maskedSecretTexts = getNumber(value, "masked_secret_texts");
-  const warnings = parseSafetyWarnings(value.warnings);
-
-  if (
-    hasDanger === null ||
-    warningCount === null ||
-    maskedInputValues === null ||
-    maskedSecretTexts === null ||
-    !warnings
-  ) {
-    return null;
-  }
-
-  return {
-    has_danger: hasDanger,
-    warning_count: warningCount,
-    warnings,
-    masked_input_values: maskedInputValues,
-    masked_secret_texts: maskedSecretTexts,
-  };
-}
-
-function parseSafetyWarnings(value: unknown): SafetyWarning[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const warnings: SafetyWarning[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) {
-      return null;
-    }
-    const category = getString(item, "category");
-    const categoryLabel = getString(item, "category_label");
-    const source = getString(item, "source");
-    const sourceLabel = getString(item, "source_label");
-    if (!category || !categoryLabel || !source || !sourceLabel) {
-      return null;
-    }
-    warnings.push({
-      category,
-      category_label: categoryLabel,
-      source,
-      source_label: sourceLabel,
-    });
-  }
-  return warnings;
-}
-
-function parseDomCapture(value: unknown): DomCapture | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const selectedText = optionalString(value.selectedText);
-  const buttons = parseButtons(value.buttons);
-  const inputs = parseInputs(value.inputs);
-
-  if (!buttons || !inputs) {
-    return null;
-  }
-
-  const capture: DomCapture = { buttons, inputs };
-  if (selectedText) {
-    capture.selectedText = selectedText;
-  }
-  return capture;
-}
-
-function parseButtons(value: unknown): RawBrowserButton[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const buttons: RawBrowserButton[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) {
-      return null;
-    }
-    buttons.push(
-      buildButton(
-        optionalString(item.text),
-        optionalString(item.aria_label),
-        optionalString(item.title),
-        optionalBoolean(item.disabled),
-        optionalBoolean(item.visible),
-      ),
-    );
-  }
-  return buttons;
-}
-
-function parseInputs(value: unknown): RawBrowserInput[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const inputs: RawBrowserInput[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) {
-      return null;
-    }
-    inputs.push(
-      buildInput(
-        parseInputKind(item.kind),
-        optionalString(item.name),
-        optionalString(item.label),
-        optionalString(item.aria_label),
-        optionalString(item.title),
-        optionalString(item.placeholder),
-        optionalBoolean(item.disabled),
-        optionalBoolean(item.visible),
-      ),
-    );
-  }
-  return inputs;
-}
-
-function parseInputKind(value: unknown): InputKind | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const allowed: readonly InputKind[] = [
-    "text",
-    "search",
-    "email",
-    "password",
-    "number",
-    "tel",
-    "url",
-    "checkbox",
-    "radio",
-    "select",
-    "textarea",
-    "content_editable",
-  ];
-  for (const kind of allowed) {
-    if (value === kind) {
-      return kind;
-    }
-  }
-  return undefined;
-}
-
-function formatSafetySummary(safety: SafetySummary): string {
-  const warningLines =
-    safety.warnings.length === 0
-      ? ["warnings: none"]
-      : safety.warnings.map(
-          (warning) => `warning: ${warning.category_label} (${warning.source_label})`,
-        );
-
-  return [
-    `danger: ${safety.has_danger ? "yes" : "no"}`,
-    `warning_count: ${safety.warning_count}`,
-    `masked_input_values: ${safety.masked_input_values}`,
-    `masked_secret_texts: ${safety.masked_secret_texts}`,
-    ...warningLines,
-  ].join("\n");
 }
 
 function setRequestInFlight(isBusy: boolean): void {
@@ -1141,37 +728,6 @@ function requireElement<T extends HTMLElement>(
     throw new Error(`Missing element: ${id}`);
   }
   return element;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getString(record: Record<string, unknown>, key: string): string | null {
-  const value = record[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function getBoolean(record: Record<string, unknown>, key: string): boolean | null {
-  const value = record[key];
-  return typeof value === "boolean" ? value : null;
-}
-
-function getNumber(record: Record<string, unknown>, key: string): number | null {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function optionalBoolean(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 export {};
