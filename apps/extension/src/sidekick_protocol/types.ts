@@ -112,6 +112,7 @@ export type MessageRole = "user" | "assistant" | "system_notice";
 export type MessageStatus = "pending" | "streaming" | "completed" | "failed" | "cancelled";
 export type TurnStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type SafetyStatus = "clean" | "warning";
+export type MessageSendIdempotencyDisposition = "discard";
 
 export type ErrorCode =
   | "unauthorized"
@@ -147,13 +148,29 @@ export type ErrorCode =
 export class SidekickProtocolError extends Error {
   readonly code: ErrorCode;
   readonly retryable: boolean | undefined;
+  readonly messageSendIdempotencyDisposition: MessageSendIdempotencyDisposition | undefined;
 
-  constructor(code: ErrorCode, message: string, retryable?: boolean) {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    options: SidekickProtocolErrorOptions | boolean = {},
+  ) {
     super(message);
     this.name = "SidekickProtocolError";
     this.code = code;
-    this.retryable = retryable;
+    if (typeof options === "boolean") {
+      this.retryable = options;
+      this.messageSendIdempotencyDisposition = undefined;
+      return;
+    }
+    this.retryable = options.retryable;
+    this.messageSendIdempotencyDisposition = options.messageSendIdempotencyDisposition;
   }
+}
+
+export interface SidekickProtocolErrorOptions {
+  retryable?: boolean;
+  messageSendIdempotencyDisposition?: MessageSendIdempotencyDisposition;
 }
 
 export interface WireSuccess {

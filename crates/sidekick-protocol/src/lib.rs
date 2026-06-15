@@ -190,6 +190,14 @@ pub struct ErrorData {
     pub observed_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_send_idempotency_disposition: Option<MessageSendIdempotencyDisposition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageSendIdempotencyDisposition {
+    Discard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

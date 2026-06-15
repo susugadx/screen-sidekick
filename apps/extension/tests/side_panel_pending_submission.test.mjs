@@ -34,7 +34,6 @@ test("retained retry setup failure keeps pending submission for idempotent reuse
   assert.equal(
     state.shouldDiscardAfterFailure(pending, {
       recoveryRequired: false,
-      terminalReplayFailure: false,
     }),
     true,
   );
@@ -44,41 +43,21 @@ test("retained retry setup failure keeps pending submission for idempotent reuse
   assert.equal(
     state.shouldDiscardAfterFailure(pending, {
       recoveryRequired: false,
-      terminalReplayFailure: false,
     }),
     false,
   );
   assert.equal(state.findRetryable(SETTINGS, "Question", "sess_1"), pending);
 });
 
-test("terminal idempotency replay failure discards retained pending submission", () => {
+test("discard removes retained pending submission", () => {
   const state = new PendingSubmittedQuestionState();
   const pending = state.set(pendingQuestion());
 
   state.retainForIdempotentRetry(pending);
+  state.discard(pending);
 
-  assert.equal(
-    state.shouldDiscardAfterFailure(pending, {
-      recoveryRequired: false,
-      terminalReplayFailure: true,
-    }),
-    true,
-  );
-});
-
-test("terminal idempotency replay failure discards retained pending submission during recovery", () => {
-  const state = new PendingSubmittedQuestionState();
-  const pending = state.set(pendingQuestion());
-
-  state.retainForIdempotentRetry(pending);
-
-  assert.equal(
-    state.shouldDiscardAfterFailure(pending, {
-      recoveryRequired: true,
-      terminalReplayFailure: true,
-    }),
-    true,
-  );
+  assert.equal(state.current(), null);
+  assert.equal(state.findRetryable(SETTINGS, "Question", "sess_1"), null);
 });
 
 test("recovery failure without terminal replay keeps retained pending submission", () => {
@@ -90,7 +69,6 @@ test("recovery failure without terminal replay keeps retained pending submission
   assert.equal(
     state.shouldDiscardAfterFailure(pending, {
       recoveryRequired: true,
-      terminalReplayFailure: false,
     }),
     false,
   );

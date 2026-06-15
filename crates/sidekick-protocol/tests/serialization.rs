@@ -1,7 +1,8 @@
 use screen_sidekick_sidekick_protocol::{
     method, notification, ClientCapability, ClientKind, ErrorCode, ErrorData, InitializeParams,
-    JsonRpcFailure, JsonRpcNotification, JsonRpcRequest, JsonRpcSuccess, ProtocolError, Turn,
-    TurnFailedNotification, TurnStatus, SIDEKICK_PROTOCOL_VERSION,
+    JsonRpcFailure, JsonRpcNotification, JsonRpcRequest, JsonRpcSuccess,
+    MessageSendIdempotencyDisposition, ProtocolError, Turn, TurnFailedNotification, TurnStatus,
+    SIDEKICK_PROTOCOL_VERSION,
 };
 use serde_json::json;
 
@@ -63,6 +64,28 @@ fn error_response_uses_stable_error_code() {
 
     assert_eq!(value["error"]["code"], json!("session_not_found"));
     assert_eq!(value["error"]["data"]["retryable"], json!(false));
+}
+
+#[test]
+fn error_response_serializes_message_send_idempotency_disposition() {
+    let response = JsonRpcFailure::new(
+        "req_1",
+        ProtocolError::new(
+            ErrorCode::CodexNotFound,
+            "Previous message/send attempt failed.",
+        )
+        .with_data(ErrorData {
+            message_send_idempotency_disposition: Some(MessageSendIdempotencyDisposition::Discard),
+            ..ErrorData::default()
+        }),
+    );
+
+    let value = serde_json::to_value(response).expect("response serializes");
+
+    assert_eq!(
+        value["error"]["data"]["message_send_idempotency_disposition"],
+        json!("discard")
+    );
 }
 
 #[test]

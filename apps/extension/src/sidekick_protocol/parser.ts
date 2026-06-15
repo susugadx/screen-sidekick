@@ -4,10 +4,12 @@ import {
   type CodexReadiness,
   type ErrorCode,
   type InitializeResult,
+  type MessageSendIdempotencyDisposition,
   type MessageRole,
   type MessageSendResult,
   type MessageStatus,
   type ProtocolLimits,
+  type SidekickProtocolErrorOptions,
   type SafetyStatus,
   type SidekickAttachment,
   type SidekickMessage,
@@ -189,8 +191,25 @@ function parseProtocolError(value: unknown): SidekickProtocolError | null {
   if (!code || !message) {
     return null;
   }
-  const retryable = isRecord(value.data) ? getBoolean(value.data, "retryable") : undefined;
-  return new SidekickProtocolError(code, message, retryable ?? undefined);
+  const data = isRecord(value.data) ? value.data : null;
+  const retryable = data ? getBoolean(data, "retryable") : null;
+  const messageSendIdempotencyDisposition = data
+    ? parseMessageSendIdempotencyDisposition(data.message_send_idempotency_disposition)
+    : undefined;
+  const options: SidekickProtocolErrorOptions = {};
+  if (retryable !== null) {
+    options.retryable = retryable;
+  }
+  if (messageSendIdempotencyDisposition) {
+    options.messageSendIdempotencyDisposition = messageSendIdempotencyDisposition;
+  }
+  return new SidekickProtocolError(code, message, options);
+}
+
+function parseMessageSendIdempotencyDisposition(
+  value: unknown,
+): MessageSendIdempotencyDisposition | undefined {
+  return value === "discard" ? value : undefined;
 }
 
 function parseCodexReadiness(value: unknown): CodexReadiness | null {

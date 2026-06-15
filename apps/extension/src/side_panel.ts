@@ -58,6 +58,10 @@ type ActiveChatRecoveryGuard = {
   daemonToken: string;
 };
 
+type EnsureActiveSessionOptions = {
+  resetStaleSession?: boolean;
+};
+
 const elements = {
   bridgeForm: requireElement("bridge-form", HTMLFormElement),
   bridgeUrl: requireElement("bridge-url", HTMLInputElement),
@@ -122,7 +126,7 @@ async function saveDaemonSettings(): Promise<void> {
   }
   if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
     clearActiveChatState();
-    await clearActiveChatMarker();
+    await clearActiveChatMarker(captureState.currentGrant());
   }
   setStatus("Saved");
 }
@@ -174,16 +178,19 @@ async function askCodex(): Promise<void> {
     clearPendingSubmittedQuestion(pendingQuestion);
   } catch (error) {
     const recoveryRequired = sessionRecoveryRequired;
-    if (recoveryRequired && pendingQuestion) {
-      pendingSubmittedQuestions.retainForIdempotentRetry(pendingQuestion);
-    }
-    if (
-      pendingSubmittedQuestions.shouldDiscardAfterFailure(pendingQuestion, {
-        recoveryRequired,
-        terminalReplayFailure: isTerminalMessageSendReplayError(error),
-      })
-    ) {
+    if (pendingQuestion && isTerminalMessageSendReplayError(error)) {
       pendingSubmittedQuestions.discard(pendingQuestion);
+    } else {
+      if (recoveryRequired && pendingQuestion) {
+        pendingSubmittedQuestions.retainForIdempotentRetry(pendingQuestion);
+      }
+      if (
+        pendingSubmittedQuestions.shouldDiscardAfterFailure(pendingQuestion, {
+          recoveryRequired,
+        })
+      ) {
+        pendingSubmittedQuestions.discard(pendingQuestion);
+      }
     }
     if (recoveryRequired) {
       setStatus("Reconnecting to daemon");
@@ -210,7 +217,17 @@ async function prepareSubmittedQuestion(
     pendingSubmittedQuestions.retainForIdempotentRetry(retryQuestion);
     setStatus("Asking");
     const client = await ensureProtocolClient(settings);
-    const sessionId = await ensureActiveSession(client, settings);
+    let sessionId: string;
+    try {
+      sessionId = await ensureActiveSession(client, settings);
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        pendingSubmittedQuestions.discard(retryQuestion);
+        clearActiveChatState();
+        void clearActiveChatMarker(captureState.currentGrant());
+      }
+      throw error;
+    }
     return {
       client,
       sessionId,
@@ -222,7 +239,9 @@ async function prepareSubmittedQuestion(
   setStatus("Capturing");
   const capturedContext = await captureState.captureActiveTabContextWithGrant();
   const client = await ensureProtocolClient(settings);
-  const sessionId = await ensureActiveSession(client, settings);
+  const sessionId = await ensureActiveSession(client, settings, {
+    resetStaleSession: true,
+  });
   const attachment = await client.attachBrowserContext(
     sessionId,
     capturedContext.context,
@@ -300,7 +319,7 @@ async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickP
   disconnectProtocolClient();
   if (settingsChanged) {
     clearActiveChatState();
-    void clearActiveChatMarker();
+    void clearActiveChatMarker(captureState.currentGrant());
   }
 
   const version = chrome.runtime.getManifest().version;
@@ -313,13 +332,25 @@ async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickP
 async function ensureActiveSession(
   client: SidekickProtocolClient,
   settings: DaemonSettings,
+  options: EnsureActiveSessionOptions = {},
 ): Promise<string> {
   if (activeSessionId) {
-    if (subscribedSessionId !== activeSessionId) {
-      await client.subscribeSession(activeSessionId);
-      subscribedSessionId = activeSessionId;
+    const sessionId = activeSessionId;
+    if (subscribedSessionId !== sessionId) {
+      try {
+        await client.subscribeSession(sessionId);
+        subscribedSessionId = sessionId;
+        return sessionId;
+      } catch (error) {
+        if (!options.resetStaleSession || !isSessionNotFoundError(error)) {
+          throw error;
+        }
+        clearActiveChatState();
+        await clearActiveChatMarker(captureState.currentGrant());
+      }
+    } else {
+      return sessionId;
     }
-    return activeSessionId;
   }
 
   const session = await client.createSession("Screen Sidekick");
@@ -598,14 +629,18 @@ function clearSubmittedDraftIfUnchanged(submittedText: string | null): void {
 }
 
 function handleSessionRecoveryError(error: unknown, fallbackMessage: string): void {
-  if (error instanceof SidekickProtocolError && error.code === "session_not_found") {
+  if (isSessionNotFoundError(error)) {
     clearActiveChatState();
-    void clearActiveChatMarker();
+    void clearActiveChatMarker(captureState.currentGrant());
     setError("Daemon session was not found");
     return;
   }
   clearRecoveryBlockingState();
   setError(error instanceof Error ? error.message : fallbackMessage);
+}
+
+function isSessionNotFoundError(error: unknown): boolean {
+  return error instanceof SidekickProtocolError && error.code === "session_not_found";
 }
 
 function clearActiveChatState(): void {
@@ -658,7 +693,7 @@ async function persistActiveChatMarker(): Promise<void> {
     !activeSessionDaemonToken ||
     !captureGrant
   ) {
-    await clearActiveChatMarker();
+    await clearActiveChatMarker(captureGrant);
     return;
   }
   const marker: ActiveChatMarker = {

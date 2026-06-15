@@ -14,10 +14,11 @@ use screen_sidekick_sidekick_protocol::{
     method, notification, AttachBrowserContextParams, AttachBrowserContextResult, Attachment,
     AttachmentSourceType, AuthStatus, CaptureReason, ClientCapability, CodexReadiness, ErrorCode,
     ErrorData, InitializeParams, InitializeResult, JsonRpcFailure, JsonRpcNotification,
-    JsonRpcRequest, JsonRpcSuccess, MessageCreatedNotification, MessageMode, MessageSendParams,
-    MessageSendResult, ProtocolError, SafetyStatus, SessionCreateParams, SessionCreateResult,
-    SessionIdParams, SessionListResult, StatusGetResult, TurnCancelParams, TurnDeltaNotification,
-    TurnFailedNotification, TurnNotification, SIDEKICK_PROTOCOL_VERSION,
+    JsonRpcRequest, JsonRpcSuccess, MessageCreatedNotification, MessageMode,
+    MessageSendIdempotencyDisposition, MessageSendParams, MessageSendResult, ProtocolError,
+    SafetyStatus, SessionCreateParams, SessionCreateResult, SessionIdParams, SessionListResult,
+    StatusGetResult, TurnCancelParams, TurnDeltaNotification, TurnFailedNotification,
+    TurnNotification, SIDEKICK_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -945,17 +946,27 @@ fn session_error(error: SessionStoreError) -> ProtocolError {
             None,
         ),
         SessionStoreError::IdempotencyFailed(code) => {
-            protocol_error(code, "Previous message/send attempt failed.", None)
+            message_send_idempotency_discard_error(code, "Previous message/send attempt failed.")
         }
-        SessionStoreError::IdempotencyCancelled => protocol_error(
+        SessionStoreError::IdempotencyCancelled => message_send_idempotency_discard_error(
             ErrorCode::InvalidParams,
             "Previous message/send attempt was cancelled.",
-            None,
         ),
         SessionStoreError::Sqlite(_) | SessionStoreError::LockPoisoned => {
             protocol_error(ErrorCode::InternalError, "Session storage failed.", None)
         }
     }
+}
+
+fn message_send_idempotency_discard_error(code: ErrorCode, message: &'static str) -> ProtocolError {
+    protocol_error(
+        code,
+        message,
+        Some(ErrorData {
+            message_send_idempotency_disposition: Some(MessageSendIdempotencyDisposition::Discard),
+            ..ErrorData::default()
+        }),
+    )
 }
 
 fn capture_error(error: CapturePipelineError) -> ProtocolError {

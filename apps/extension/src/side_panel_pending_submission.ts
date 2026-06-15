@@ -75,14 +75,10 @@ export class PendingSubmittedQuestionState {
     pendingQuestion: PendingSubmittedQuestion | null,
     failure: {
       recoveryRequired: boolean;
-      terminalReplayFailure: boolean;
     },
   ): pendingQuestion is PendingSubmittedQuestion {
     if (!pendingQuestion || this.pendingQuestion !== pendingQuestion) {
       return false;
-    }
-    if (failure.terminalReplayFailure) {
-      return true;
     }
     if (failure.recoveryRequired) {
       return false;

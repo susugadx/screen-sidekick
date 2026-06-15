@@ -3,9 +3,12 @@ import test from "node:test";
 
 import { installManualTimers, waitForMicrotasks } from "./manual_timers.mjs";
 import {
+  activeChatMap,
+  activeChatMarkerFor,
   activeChatStorage,
   assertDifferentMessageSendRequest,
   completedActiveChatSessions,
+  currentActiveChatMarker,
   element,
   importFreshSidePanel,
   importFreshSidePanelWithMicrotasks,
@@ -133,7 +136,7 @@ test("websocket close before message persistence keeps draft when restored sessi
   const repeatedQuestion = "Repeat this question";
   const server = installSidePanelHarness({
     closeBeforePersistSendNumbers: new Set([1]),
-    storage: activeChatStorage(scopedActiveChatMarkerWithoutTurn()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarkerWithoutTurn())),
     sessions: completedActiveChatSessions(repeatedQuestion),
   });
   await importFreshSidePanel();
@@ -181,7 +184,7 @@ test("recovery failure after message send response loss re-enables ask controls"
 
 test("side panel reload restores a persisted in-flight session", async () => {
   const server = installSidePanelHarness({
-    storage: activeChatStorage(scopedActiveChatMarker()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
     sessions: runningActiveChatSessions("Persisted question"),
   });
   await importFreshSidePanel();
@@ -207,7 +210,7 @@ test("side panel reload restores a persisted in-flight session", async () => {
 test("stored active chat recovery failure re-enables ask controls", async () => {
   const server = installSidePanelHarness({
     failSessionGetNumbers: new Set([1]),
-    storage: activeChatStorage(scopedActiveChatMarker()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
     sessions: runningActiveChatSessions(),
   });
   await importFreshSidePanel();
@@ -222,7 +225,7 @@ test("recovery keeps save enabled and ignores delayed stale snapshots after sett
   const server = installSidePanelHarness({
     deferCloseEvents: true,
     deferSessionGetNumbers: new Set([1]),
-    storage: activeChatStorage(scopedActiveChatMarker()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
     sessions: runningActiveChatSessions("Old recovery question"),
   });
   await importFreshSidePanel();
@@ -261,7 +264,7 @@ test("recovery keeps save enabled and ignores delayed stale snapshots after sett
 test("hung recovery keeps save available to clear active chat state", async () => {
   const server = installSidePanelHarness({
     deferSessionGetNumbers: new Set([1]),
-    storage: activeChatStorage(scopedActiveChatMarker()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
     sessions: runningActiveChatSessions("Hung recovery question"),
   });
   await importFreshSidePanel();
@@ -289,7 +292,9 @@ test("hung recovery keeps save available to clear active chat state", async () =
 
 test("stored active chat with a different token is not recovered", async () => {
   const server = installSidePanelHarness({
-    storage: activeChatStorage(scopedActiveChatMarker({ daemonToken: "old-token" })),
+    storage: activeChatStorage(
+      activeChatMap(scopedActiveChatMarker({ daemonToken: "old-token" })),
+    ),
     sessions: runningActiveChatSessions("Stale token question"),
   });
   await importFreshSidePanel();
@@ -303,7 +308,7 @@ test("stored active chat with a different token is not recovered", async () => {
 
 test("stored active chat with a different tab is not recovered", async () => {
   const server = installSidePanelHarness({
-    storage: activeChatStorage(scopedActiveChatMarker({ tabId: 8 })),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker({ tabId: 8 }))),
     sessions: runningActiveChatSessions("Different tab question"),
   });
   await importFreshSidePanel();
@@ -317,7 +322,9 @@ test("stored active chat with a different tab is not recovered", async () => {
 
 test("stored active chat with a different origin is not recovered", async () => {
   const server = installSidePanelHarness({
-    storage: activeChatStorage(scopedActiveChatMarker({ origin: "https://other.example" })),
+    storage: activeChatStorage(
+      activeChatMap(scopedActiveChatMarker({ origin: "https://other.example" })),
+    ),
     sessions: runningActiveChatSessions("Different origin question"),
   });
   await importFreshSidePanel();
@@ -327,6 +334,19 @@ test("stored active chat with a different origin is not recovered", async () => 
   assert.equal(element("ask").disabled, false);
   assert.equal(element("message-input").disabled, false);
   assert.equal(transcriptText(), "");
+});
+
+test("legacy single active chat marker is recovered", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(scopedActiveChatMarker()),
+    sessions: runningActiveChatSessions("Legacy single marker question"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(server.sessionCreateCount, 0);
+  assert.deepEqual(server.subscribeSessionIds, ["sess_1"]);
+  assert.equal(transcriptText().includes("Legacy single marker question"), true);
 });
 
 test("legacy stored active chat without tab scope is not recovered", async () => {
@@ -349,10 +369,11 @@ test("new active chat marker stores current tab and origin scope", async () => {
 
   submitMessage("Scoped marker question");
   const marker = await waitForStoredActiveChat(
-    (value) => value?.activeTurnId === "turn_1",
+    (value) => currentActiveChatMarker(value)?.activeTurnId === "turn_1",
   );
 
-  assert.deepEqual(marker, {
+  assert.equal(marker.version, 1);
+  assert.deepEqual(currentActiveChatMarker(marker), {
     daemonUrl: "http://127.0.0.1:43001",
     daemonToken: "pairing-token",
     tabId: 7,
@@ -360,6 +381,65 @@ test("new active chat marker stores current tab and origin scope", async () => {
     sessionId: "sess_1",
     activeTurnId: "turn_1",
   });
+});
+
+test("active chat marker map preserves other tab markers", async () => {
+  const otherMarker = scopedActiveChatMarker({
+    tabId: 8,
+    sessionId: "sess_other",
+    activeTurnId: "turn_other",
+  });
+  installSidePanelHarness({
+    storage: activeChatStorage(activeChatMap(otherMarker)),
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Scoped marker question");
+  const activeChat = await waitForStoredActiveChat(
+    (value) => currentActiveChatMarker(value)?.activeTurnId === "turn_1",
+  );
+
+  assert.deepEqual(
+    activeChatMarkerFor(activeChat, otherMarker),
+    otherMarker,
+  );
+  assert.deepEqual(currentActiveChatMarker(activeChat), {
+    daemonUrl: "http://127.0.0.1:43001",
+    daemonToken: "pairing-token",
+    tabId: 7,
+    origin: "https://example.test",
+    sessionId: "sess_1",
+    activeTurnId: "turn_1",
+  });
+});
+
+test("settings change clears only the current active chat marker", async () => {
+  const otherMarker = scopedActiveChatMarker({
+    tabId: 8,
+    sessionId: "sess_other",
+    activeTurnId: "turn_other",
+  });
+  installSidePanelHarness({
+    storage: activeChatStorage(activeChatMap(otherMarker)),
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Current marker question");
+  await waitForStoredActiveChat(
+    (value) => currentActiveChatMarker(value)?.activeTurnId === "turn_1",
+  );
+
+  element("bridge-url").value = "http://127.0.0.1:43002";
+  element("bridge-form").dispatchEvent(
+    new window.Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await waitFor(() => element("status").textContent === "Saved");
+
+  const stored = await chrome.storage.session.get(["activeChat"]);
+  assert.deepEqual(stored.activeChat, activeChatMap(otherMarker));
 });
 
 test("session not found recovery clears stale transcript", async () => {
@@ -376,6 +456,69 @@ test("session not found recovery clears stale transcript", async () => {
 
   assert.equal(transcriptText(), "");
   assert.equal(element("status").textContent, "Daemon session was not found");
+});
+
+test("fresh ask resets stale active session and continues in a new session", async () => {
+  const server = installSidePanelHarness({
+    failMissingSessionSubscribe: true,
+  });
+  await importFreshSidePanel();
+
+  submitMessage("First question");
+  await waitFor(() => server.sendCount === 1);
+  server.socket.receiveNotification("turn/completed", {
+    session_id: "sess_1",
+    turn: {
+      id: "turn_1",
+      session_id: "sess_1",
+      status: "completed",
+    },
+  });
+  await waitFor(() => element("ask").disabled === false);
+
+  server.sessions.delete("sess_1");
+  server.socket.close();
+  await nextTick();
+
+  submitMessage("Second question");
+  await waitFor(() => server.sendCount === 2);
+
+  assert.equal(server.sessionCreateCount, 2);
+  assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_2"]);
+  assert.deepEqual(server.attachSessionIds, ["sess_1", "sess_2"]);
+  assert.equal(transcriptText().includes("Second question"), true);
+});
+
+test("retained retry discards stale session state instead of reusing attachments in a new session", async () => {
+  const question = "Retry after stale session";
+  const server = installSidePanelHarness({
+    closeBeforePersistSendNumbers: new Set([1]),
+    failMissingSessionSubscribe: true,
+  });
+  await importFreshSidePanel();
+
+  submitMessage(question);
+  await waitFor(() => server.sessionGetCount === 1);
+  await waitFor(() => element("ask").disabled === false);
+
+  const firstRequest = server.messageSendRequests[0];
+  server.sessions.delete("sess_1");
+  server.socket.close();
+  await nextTick();
+
+  submitMessage(question);
+  await waitFor(() => element("status").textContent === "Session was not found.");
+
+  assert.equal(server.sendCount, 1);
+
+  submitMessage(question);
+  await waitFor(() => server.sendCount === 2);
+  const freshRequest = server.messageSendRequests[1];
+
+  assert.equal(server.sessionCreateCount, 2);
+  assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_2"]);
+  assert.deepEqual(server.attachSessionIds, ["sess_1", "sess_2"]);
+  assertDifferentMessageSendRequest(freshRequest, firstRequest);
 });
 
 test("reconnects instead of reusing a closed daemon websocket", async () => {
@@ -407,7 +550,7 @@ test("reconnects instead of reusing a closed daemon websocket", async () => {
 test("stored active chat session get timeout releases recovery controls", async () => {
   const server = installSidePanelHarness({
     deferSessionGetNumbers: new Set([1]),
-    storage: activeChatStorage(scopedActiveChatMarker()),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
     sessions: runningActiveChatSessions("Persisted question"),
   });
   const timers = installManualTimers();

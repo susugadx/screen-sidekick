@@ -4,6 +4,8 @@ import { JSDOM } from "jsdom";
 import { waitForMicrotasks } from "../manual_timers.mjs";
 
 let moduleCounter = 0;
+const CURRENT_TAB_ID = 7;
+const CURRENT_ORIGIN = "https://example.test";
 
 export async function importFreshSidePanel(expectedDaemonUrl = "http://127.0.0.1:43001") {
   await import(`../../dist/side_panel.js?test=${++moduleCounter}`);
@@ -83,8 +85,8 @@ export function scopedActiveChatMarker(overrides = {}) {
   return {
     daemonUrl: "http://127.0.0.1:43001",
     daemonToken: "pairing-token",
-    tabId: 7,
-    origin: "https://example.test",
+    tabId: CURRENT_TAB_ID,
+    origin: CURRENT_ORIGIN,
     sessionId: "sess_1",
     activeTurnId: "turn_1",
     ...overrides,
@@ -94,6 +96,32 @@ export function scopedActiveChatMarker(overrides = {}) {
 export function scopedActiveChatMarkerWithoutTurn() {
   const { activeTurnId: _activeTurnId, ...marker } = scopedActiveChatMarker();
   return marker;
+}
+
+export function activeChatMap(...markers) {
+  return {
+    version: 1,
+    markers: Object.fromEntries(
+      markers.map((marker) => [activeChatScopeKey(marker.tabId, marker.origin), marker]),
+    ),
+  };
+}
+
+export function currentActiveChatMarker(activeChat) {
+  return activeChatMarkerFor(activeChat, {
+    tabId: CURRENT_TAB_ID,
+    origin: CURRENT_ORIGIN,
+  });
+}
+
+export function activeChatMarkerFor(activeChat, markerScope) {
+  return (
+    activeChat?.markers?.[activeChatScopeKey(markerScope.tabId, markerScope.origin)] ?? null
+  );
+}
+
+export function activeChatScopeKey(tabId, origin) {
+  return `tab:${tabId}|origin:${origin}`;
 }
 
 export function legacyActiveChatMarker() {
@@ -216,6 +244,10 @@ export class FakeSidekickServer {
     sessions = {},
     closeAfterTerminalReusedSendNumbers = new Set(),
     terminalReusedSendNumbers = new Set(),
+    terminalReusedSendErrorData = {
+      message_send_idempotency_disposition: "discard",
+    },
+    failMissingSessionSubscribe = false,
   } = {}) {
     this.attachmentSafetyStatus = attachmentSafetyStatus;
     this.closeBeforePersistSendNumbers = closeBeforePersistSendNumbers;
@@ -234,6 +266,8 @@ export class FakeSidekickServer {
     this.sessions = new Map(Object.entries(sessions));
     this.closeAfterTerminalReusedSendNumbers = closeAfterTerminalReusedSendNumbers;
     this.terminalReusedSendNumbers = terminalReusedSendNumbers;
+    this.terminalReusedSendErrorData = terminalReusedSendErrorData;
+    this.failMissingSessionSubscribe = failMissingSessionSubscribe;
     this.deferredCloseEvents = [];
     this.deferredSessionGetResponses = [];
     this.deferredSendResponses = [];
@@ -261,6 +295,10 @@ export class FakeSidekickServer {
         return;
       case "session/subscribe":
         this.subscribeSessionIds.push(request.params.session_id);
+        if (this.failMissingSessionSubscribe && !this.sessions.has(request.params.session_id)) {
+          socket.receiveFailure(request.id, "session_not_found", "Session was not found.");
+          return;
+        }
         socket.receiveSuccess(request.id, {});
         return;
       case "session/create":
@@ -345,6 +383,7 @@ export class FakeSidekickServer {
                 request.id,
                 "codex_not_found",
                 "Previous message/send attempt failed.",
+                this.terminalReusedSendErrorData,
               );
               if (this.closeAfterTerminalReusedSendNumbers.has(this.reusedSendCount)) {
                 socket.close();
@@ -529,13 +568,14 @@ export class FakeWebSocket {
     });
   }
 
-  receiveFailure(id, code, message) {
+  receiveFailure(id, code, message, data = undefined) {
     this.receive({
       jsonrpc: "2.0",
       id,
       error: {
         code,
         message,
+        ...(data === undefined ? {} : { data }),
       },
     });
   }
@@ -606,8 +646,25 @@ function installDom() {
       clipboard: {
         writeText: async () => {},
       },
+      locks: new FakeLockManager(),
     },
   });
+}
+
+class FakeLockManager {
+  constructor() {
+    this.queues = new Map();
+  }
+
+  request(name, callback) {
+    const previous = this.queues.get(name) ?? Promise.resolve();
+    const next = previous.then(() => callback(null));
+    this.queues.set(
+      name,
+      next.catch(() => {}),
+    );
+    return next;
+  }
 }
 
 function installChrome(initialStorage = {}) {

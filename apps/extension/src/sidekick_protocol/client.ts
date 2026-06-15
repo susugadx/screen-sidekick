@@ -42,7 +42,7 @@ type RequestOptions = {
 
 const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
 const REQUEST_TOO_LARGE_MESSAGE = "Daemon request is too large for the WebSocket limit.";
-const TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES = new Set([
+const LEGACY_TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES = new Set([
   "Previous message/send attempt failed.",
   "Previous message/send attempt was cancelled.",
 ]);
@@ -408,7 +408,8 @@ export function createMessageSendIdempotencyKey(): string {
 export function isTerminalMessageSendReplayError(error: unknown): boolean {
   return (
     error instanceof SidekickProtocolError &&
-    TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES.has(error.message)
+    (error.messageSendIdempotencyDisposition === "discard" ||
+      LEGACY_TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES.has(error.message))
   );
 }
 

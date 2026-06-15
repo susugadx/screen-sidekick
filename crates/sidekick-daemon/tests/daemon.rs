@@ -28,8 +28,8 @@ use screen_sidekick_sidekick_daemon::{
 };
 use screen_sidekick_sidekick_protocol::{
     method, notification, AttachmentSourceType, ErrorCode, JsonRpcFailure, JsonRpcRequest,
-    JsonRpcResponse, JsonRpcSuccess, MessageRole, ProtocolError, SafetyStatus,
-    SIDEKICK_PROTOCOL_VERSION,
+    JsonRpcResponse, JsonRpcSuccess, MessageRole, MessageSendIdempotencyDisposition, ProtocolError,
+    SafetyStatus, SIDEKICK_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -833,6 +833,7 @@ async fn websocket_codex_start_failure_emits_turn_failed_and_clears_active_turn(
 
     assert_eq!(retry_error.code, ErrorCode::CodexNotFound);
     assert_eq!(retry_error.message, "Previous message/send attempt failed.");
+    assert_message_send_idempotency_discard(&retry_error);
     assert!(read_notification_with_timeout(&mut socket).await.is_none());
     assert_eq!(codex.start_count(), 1);
 }
@@ -1404,6 +1405,26 @@ async fn websocket_turn_cancel_emits_cancelled_for_stored_turn_session() {
     assert_eq!(codex.last_cancel_turn_id().as_deref(), Some("fake_turn"));
     let session_state = store.get_session(&session_id).expect("session loads");
     assert!(session_state.active_turn.is_none());
+
+    let retry_error = send_request_expect_error(
+        &mut socket,
+        "send-retry",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id,
+            "text": "Cancel this",
+            "idempotency_key": "cancel-ok",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    assert_eq!(retry_error.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        retry_error.message,
+        "Previous message/send attempt was cancelled."
+    );
+    assert_message_send_idempotency_discard(&retry_error);
 }
 
 #[tokio::test]
@@ -1917,6 +1938,16 @@ async fn send_request_expect_error(
             JsonRpcResponse::Error(JsonRpcFailure { error, .. }) => error,
         };
     }
+}
+
+fn assert_message_send_idempotency_discard(error: &ProtocolError) {
+    assert_eq!(
+        error
+            .data
+            .as_deref()
+            .and_then(|data| data.message_send_idempotency_disposition),
+        Some(MessageSendIdempotencyDisposition::Discard)
+    );
 }
 
 async fn send_request_expect_error_collecting_notifications_until(

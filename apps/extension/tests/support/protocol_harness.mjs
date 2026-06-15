@@ -265,13 +265,14 @@ export class ProtocolFakeWebSocket {
     this.server.handle(this, request);
   }
 
-  receiveFailure(id, code, message) {
+  receiveFailure(id, code, message, data = undefined) {
     this.receive({
       jsonrpc: "2.0",
       id,
       error: {
         code,
         message,
+        ...(data === undefined ? {} : { data }),
       },
     });
   }

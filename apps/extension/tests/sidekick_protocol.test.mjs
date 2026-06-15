@@ -69,9 +69,41 @@ test("parses JSON-RPC protocol errors with stable codes", () => {
   assert.equal(message.id, "request-1");
   assert.equal(message.error.code, "unauthorized");
   assert.equal(message.error.retryable, false);
+  assert.equal(message.error.messageSendIdempotencyDisposition, undefined);
 });
 
-test("classifies terminal message send replay errors", () => {
+test("parses structured message send idempotency disposition", () => {
+  const message = parseWireMessageText(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: "request-1",
+      error: {
+        code: "codex_not_found",
+        message: "Previous message/send attempt failed.",
+        data: {
+          message_send_idempotency_disposition: "discard",
+        },
+      },
+    }),
+  );
+
+  assert.equal(message.kind, "failure");
+  assert.equal(message.error.messageSendIdempotencyDisposition, "discard");
+  assert.equal(
+    isTerminalMessageSendReplayError(message.error),
+    true,
+  );
+});
+
+test("classifies terminal message send replay errors from structured data and v0 legacy text", () => {
+  assert.equal(
+    isTerminalMessageSendReplayError(
+      new SidekickProtocolError("codex_not_found", "Different message.", {
+        messageSendIdempotencyDisposition: "discard",
+      }),
+    ),
+    true,
+  );
   assert.equal(
     isTerminalMessageSendReplayError(
       new SidekickProtocolError("codex_not_found", "Previous message/send attempt failed."),
@@ -90,7 +122,16 @@ test("classifies terminal message send replay errors", () => {
     ),
     false,
   );
-  assert.equal(isTerminalMessageSendReplayError(new Error("Previous message/send attempt failed.")), false);
+  assert.equal(
+    isTerminalMessageSendReplayError(
+      new SidekickProtocolError("codex_not_found", "Previous message/send attempt failed"),
+    ),
+    false,
+  );
+  assert.equal(
+    isTerminalMessageSendReplayError(new Error("Previous message/send attempt failed.")),
+    false,
+  );
 });
 
 test("parses initialize result codex readiness", () => {

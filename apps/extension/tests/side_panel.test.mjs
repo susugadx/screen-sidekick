@@ -6,6 +6,7 @@ import {
   assertDifferentMessageSendRequest,
   assertSameMessageSendRequest,
   captureBridgeResponse,
+  currentActiveChatMarker,
   element,
   importFreshSidePanel,
   installSidePanelHarness,
@@ -410,6 +411,40 @@ test("terminal idempotency replay failure drops pending reuse state for the next
   assert.equal(freshRequest.text, question);
 });
 
+test("message send replay error text without disposition drops pending reuse state", async () => {
+  const question = "Retry after unstructured idempotency failure";
+  const server = installSidePanelHarness({
+    closeBeforeSendResponseNumbers: new Set([1]),
+    failSessionGetNumbers: new Set([1]),
+    terminalReusedSendNumbers: new Set([1]),
+    terminalReusedSendErrorData: null,
+  });
+  await importFreshSidePanel();
+
+  submitMessage(question);
+  await waitFor(() => server.sessionGetCount === 1);
+  await waitFor(() => element("ask").disabled === false);
+
+  const firstRequest = server.messageSendRequests[0];
+
+  submitMessage(question);
+  await waitFor(() => server.reusedSendCount === 1);
+  await waitFor(() => element("ask").disabled === false);
+
+  const unstructuredReplayRequest = server.messageSendRequests[1];
+  assertSameMessageSendRequest(unstructuredReplayRequest, firstRequest, question);
+  assert.equal(element("message-input").value, question);
+  assert.equal(element("status").textContent, "Previous message/send attempt failed.");
+
+  submitMessage(question);
+  await waitFor(() => server.sendCount === 3);
+
+  const freshRequest = server.messageSendRequests[2];
+  assert.equal(server.attachCount, 2);
+  assertDifferentMessageSendRequest(freshRequest, firstRequest);
+  assert.equal(freshRequest.text, question);
+});
+
 test("terminal idempotency replay failure drops pending state before recovery retention", async () => {
   const question = "Retry after terminal idempotency failure during recovery";
   const server = installSidePanelHarness({
@@ -583,10 +618,13 @@ test("delayed message send response keeps ask disabled until turn completes", as
   server.releaseDeferredSendResponses();
   await waitFor(() => element("status").textContent === "Asking");
   const activeChat = await waitForStoredActiveChat(
-    (storedActiveChat) => storedActiveChat?.activeTurnId === "turn_1",
+    (storedActiveChat) =>
+      currentActiveChatMarker(storedActiveChat)?.activeTurnId === "turn_1",
   );
+  const marker = currentActiveChatMarker(activeChat);
 
-  assert.equal(activeChat.activeTurnId, "turn_1");
+  assert.equal(activeChat.version, 1);
+  assert.equal(marker.activeTurnId, "turn_1");
   assert.equal(element("ask").disabled, true);
   assert.equal(element("message-input").disabled, true);
   assert.equal(messageRows().length, 2);

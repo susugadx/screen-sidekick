@@ -20,6 +20,7 @@ export type {
   DaemonSettings,
   ErrorCode,
   InitializeResult,
+  MessageSendIdempotencyDisposition,
   MessageMode,
   MessageRole,
   MessageSendResult,
