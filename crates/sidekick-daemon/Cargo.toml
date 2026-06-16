@@ -1,0 +1,27 @@
+[package]
+name = "screen-sidekick-sidekick-daemon"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+axum.workspace = true
+directories.workspace = true
+futures-util.workspace = true
+screen-sidekick-capture-pipeline.workspace = true
+screen-sidekick-codex-client.workspace = true
+screen-sidekick-session.workspace = true
+screen-sidekick-sidekick-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true
+tower.workspace = true

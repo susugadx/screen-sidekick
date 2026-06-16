@@ -1,0 +1,10 @@
+{
+  "codex_cli_version": "codex-cli 0.139.0",
+  "generated_at": "2026-06-10T17:42:47Z",
+  "generation_command": "codex app-server generate-json-schema --out crates/codex-client/schema/app-server",
+  "experimental": false,
+  "schema_hash": "sha256:67d320b22f583840762d7f14fba1b779ed7b5714b0a65c2ff9e20ffcf678d19a",
+  "notes": [
+    "Generated for the Phase 1 Chat-First Browser MVP app-server subset."
+  ]
+}

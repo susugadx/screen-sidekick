@@ -14,22 +14,30 @@
       </header>
 
       <form id="bridge-form" class="settings">
-        <label for="bridge-url">Bridge URL</label>
+        <label for="bridge-url">Daemon URL</label>
         <input id="bridge-url" name="bridge-url" type="url" autocomplete="off" />
 
-        <label for="bridge-token">Bearer Token</label>
+        <label for="bridge-token">Pairing Token</label>
         <input id="bridge-token" name="bridge-token" type="password" autocomplete="off" />
 
         <button id="save-bridge" type="submit">Save</button>
       </form>
 
+      <section class="chat">
+        <div id="transcript" class="transcript" aria-live="polite"></div>
+        <form id="message-form" class="message-form">
+          <textarea id="message-input" rows="3" spellcheck="true"></textarea>
+          <button id="ask" type="submit">Ask Codex</button>
+        </form>
+      </section>
+
       <section class="actions">
-        <button id="capture" type="button">Capture</button>
+        <button id="debug-capture" type="button">Capture Debug</button>
       </section>
 
       <section class="preview">
         <div class="preview-heading">
-          <h2>ScreenContext JSON</h2>
+          <h2>Debug ScreenContext JSON</h2>
           <button id="copy-json" type="button" disabled>Copy</button>
         </div>
         <textarea id="screen-context-json" readonly spellcheck="false"></textarea>
@@ -37,7 +45,7 @@
 
       <section class="preview">
         <div class="preview-heading">
-          <h2>Prompt</h2>
+          <h2>Debug Prompt</h2>
           <button id="copy-prompt" type="button" disabled>Copy</button>
         </div>
         <textarea id="prompt-text" readonly spellcheck="false"></textarea>

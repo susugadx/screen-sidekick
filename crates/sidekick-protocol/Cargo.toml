@@ -1,0 +1,10 @@
+[package]
+name = "screen-sidekick-sidekick-protocol"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

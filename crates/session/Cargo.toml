@@ -1,0 +1,14 @@
+[package]
+name = "screen-sidekick-session"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+rusqlite.workspace = true
+screen-sidekick-sidekick-protocol.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
