@@ -122,6 +122,56 @@ test("active turn match clears pending submission after restored snapshot", () =
   assert.equal(state.current(), null);
 });
 
+test("terminal same-text message does not match pending submission without persisted ids", () => {
+  const state = new PendingSubmittedQuestionState();
+  const pending = state.set(pendingQuestion());
+
+  const terminalMessage = state.findTerminalMessage([
+    sidekickMessage({ id: "msg_old", text: "Question", status: "failed" }),
+  ]);
+
+  assert.equal(terminalMessage, null);
+  assert.equal(state.current(), pending);
+  assert.equal(
+    state.clearIfTerminalMessage(
+      sidekickMessage({ id: "msg_old", text: "Question", status: "failed" }),
+    ),
+    null,
+  );
+  assert.equal(state.current(), pending);
+});
+
+test("observed message id allows terminal recovery match before send response", () => {
+  const state = new PendingSubmittedQuestionState();
+  const pending = state.set(pendingQuestion());
+
+  state.recordObservedMessage(
+    sidekickMessage({ id: "msg_observed", turnId: "turn_observed" }),
+  );
+
+  const terminalMessage = state.findTerminalMessage([
+    sidekickMessage({ id: "msg_old", text: "Question", status: "failed" }),
+    sidekickMessage({
+      id: "msg_observed",
+      text: "Question",
+      status: "failed",
+      turnId: "turn_observed",
+    }),
+  ]);
+
+  assert.deepEqual(
+    terminalMessage,
+    sidekickMessage({
+      id: "msg_observed",
+      status: "failed",
+      turnId: "turn_observed",
+    }),
+  );
+  assert.equal(state.current(), pending);
+  assert.equal(state.clearIfTerminalMessage(terminalMessage), "Question");
+  assert.equal(state.current(), null);
+});
+
 test("message match rejects same text from a different session", () => {
   const pending = pendingQuestion();
 

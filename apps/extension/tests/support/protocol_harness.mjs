@@ -127,6 +127,61 @@ export class HangingSessionGetServer {
   }
 }
 
+export class HangingSessionCreateServer {
+  socket = null;
+  hangingSessionCreateId = null;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, readyInitializeResult());
+        return;
+      case "session/create":
+        this.hangingSessionCreateId = request.id;
+        return;
+      case "session/get":
+        socket.receiveSuccess(request.id, {
+          session: {
+            id: request.params.session_id,
+            title: "Recovered session",
+          },
+          messages: [],
+          attachments: [],
+          active_turn: null,
+        });
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
+  }
+}
+
+export class HangingAttachBrowserContextServer {
+  socket = null;
+  hangingAttachBrowserContextId = null;
+
+  handle(socket, request) {
+    switch (request.method) {
+      case "initialize":
+        socket.receiveSuccess(request.id, readyInitializeResult());
+        return;
+      case "context/attach_browser":
+        this.hangingAttachBrowserContextId = request.id;
+        return;
+      case "session/create":
+        socket.receiveSuccess(request.id, {
+          session: {
+            id: "sess_after_attach_timeout",
+            title: request.params.title,
+          },
+        });
+        return;
+      default:
+        socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+    }
+  }
+}
+
 export class DelayedMessageSendServer {
   socket = null;
   delayedMessageSendId = null;

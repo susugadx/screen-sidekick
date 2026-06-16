@@ -64,11 +64,54 @@ export class PendingSubmittedQuestionState {
     pendingQuestion.persistedTurnId = turnId;
   }
 
+  recordObservedMessage(message: SidekickMessage): void {
+    const pendingQuestion = this.pendingQuestion;
+    if (!pendingQuestion) {
+      return;
+    }
+    if (!messageCanObservePendingSubmittedQuestion(message, pendingQuestion)) {
+      return;
+    }
+    pendingQuestion.persistedMessageId = message.id;
+    if (message.turnId) {
+      pendingQuestion.persistedTurnId = message.turnId;
+    }
+  }
+
   retainForIdempotentRetry(pendingQuestion: PendingSubmittedQuestion): void {
     if (this.pendingQuestion !== pendingQuestion) {
       return;
     }
     pendingQuestion.retainForIdempotentRetry = true;
+  }
+
+  findTerminalMessage(messages: SidekickMessage[]): SidekickMessage | null {
+    const pendingQuestion = this.pendingQuestion;
+    if (!pendingQuestion) {
+      return null;
+    }
+
+    return (
+      messages.find(
+        (message) =>
+          isTerminalUserMessage(message) &&
+          messageMatchesPendingSubmittedQuestion(message, pendingQuestion),
+      ) ?? null
+    );
+  }
+
+  clearIfTerminalMessage(message: SidekickMessage): string | null {
+    const pendingQuestion = this.pendingQuestion;
+    if (!pendingQuestion) {
+      return null;
+    }
+    if (
+      !isTerminalUserMessage(message) ||
+      !messageMatchesPendingSubmittedQuestion(message, pendingQuestion)
+    ) {
+      return null;
+    }
+    return this.clear(pendingQuestion);
   }
 
   shouldDiscardAfterFailure(
@@ -142,6 +185,24 @@ export function messageMatchesPendingSubmittedQuestion(
     activeTurn &&
       activeTurn.sessionId === pendingQuestion.sessionId &&
       message.turnId === activeTurn.id,
+  );
+}
+
+function messageCanObservePendingSubmittedQuestion(
+  message: SidekickMessage,
+  pendingQuestion: PendingSubmittedQuestion,
+): boolean {
+  return (
+    message.role === "user" &&
+    message.sessionId === pendingQuestion.sessionId &&
+    message.text === pendingQuestion.text
+  );
+}
+
+function isTerminalUserMessage(message: SidekickMessage): boolean {
+  return (
+    message.role === "user" &&
+    (message.status === "failed" || message.status === "cancelled")
   );
 }
 

@@ -9,6 +9,7 @@ import {
   currentActiveChatMarker,
   element,
   importFreshSidePanel,
+  importFreshSidePanelWithMicrotasks,
   installSidePanelHarness,
   messageRows,
   nextTick,
@@ -378,6 +379,51 @@ test("retry preserves pending reuse state when reused response fails before pers
   assert.equal(messageRows().length, 2);
 });
 
+test("retry renders session snapshot timeout after reused send as a normal error", async () => {
+  const question = "Retry after reused snapshot timeout";
+  const server = installSidePanelHarness({
+    closeBeforeSendResponseNumbers: new Set([1]),
+    deferSessionGetNumbers: new Set([2]),
+    failSessionGetNumbers: new Set([1]),
+  });
+  const timers = installManualTimers();
+
+  try {
+    await importFreshSidePanelWithMicrotasks();
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sessionGetCount === 1);
+    await waitForMicrotasks(() => element("ask").disabled === false);
+
+    const firstRequest = server.messageSendRequests[0];
+    assert.equal(element("message-input").value, question);
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sessionGetCount === 2);
+    assert.equal(timers.nextDelay(), 10_000);
+    timers.fireNext();
+    await waitForMicrotasks(() => element("ask").disabled === false);
+
+    const reusedRequest = server.messageSendRequests[1];
+    assertSameMessageSendRequest(reusedRequest, firstRequest, question);
+    assert.equal(element("message-input").value, question);
+    assert.equal(element("status").textContent, "Daemon request timed out");
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sessionGetCount === 3);
+    await waitForMicrotasks(() => element("message-input").value === "");
+
+    const finalRequest = server.messageSendRequests[2];
+    assert.equal(server.attachCount, 1);
+    assert.equal(server.reusedSendCount, 2);
+    assertSameMessageSendRequest(finalRequest, firstRequest, question);
+    assert.equal(element("message-input").value, "");
+    assert.equal(element("status").textContent, "Asking");
+  } finally {
+    timers.restore();
+  }
+});
+
 test("terminal idempotency replay failure drops pending reuse state for the next submit", async () => {
   const question = "Retry after terminal idempotency failure";
   const server = installSidePanelHarness({
@@ -610,13 +656,16 @@ test("delayed message send response keeps ask disabled until turn completes", as
     assert.equal(element("status").textContent, "Capturing");
     assert.equal(transcriptText().includes("Slow question"), true);
     assert.equal(messageRows().length, 1);
+    assert.equal(timers.nextDelay(), 45_000);
+    assert.equal(timers.size, 1);
+
+    server.releaseDeferredSendResponses();
+    await waitForMicrotasks(() => element("status").textContent === "Asking");
     assert.equal(timers.size, 0);
   } finally {
     timers.restore();
   }
 
-  server.releaseDeferredSendResponses();
-  await waitFor(() => element("status").textContent === "Asking");
   const activeChat = await waitForStoredActiveChat(
     (storedActiveChat) =>
       currentActiveChatMarker(storedActiveChat)?.activeTurnId === "turn_1",

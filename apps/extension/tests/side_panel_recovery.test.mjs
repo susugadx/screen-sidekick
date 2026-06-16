@@ -7,6 +7,7 @@ import {
   activeChatMarkerFor,
   activeChatStorage,
   assertDifferentMessageSendRequest,
+  assertSameMessageSendRequest,
   completedActiveChatSessions,
   currentActiveChatMarker,
   element,
@@ -20,6 +21,7 @@ import {
   scopedActiveChatMarker,
   scopedActiveChatMarkerWithoutTurn,
   submitMessage,
+  terminalActiveChatSessions,
   transcriptText,
   waitFor,
   waitForStoredActiveChat,
@@ -156,6 +158,36 @@ test("websocket close before message persistence keeps draft when restored sessi
   assert.deepEqual(server.subscribeSessionIds, ["sess_1", "sess_1"]);
 });
 
+test("websocket close before message persistence ignores old terminal same-text row", async () => {
+  const repeatedQuestion = "Retry old failed question text";
+  const server = installSidePanelHarness({
+    closeBeforePersistSendNumbers: new Set([1]),
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarkerWithoutTurn())),
+    sessions: terminalActiveChatSessions(repeatedQuestion, "failed", "turn_old"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  submitMessage(repeatedQuestion);
+  await waitFor(() => server.sendCount === 1);
+  const firstRequest = server.messageSendRequests[0];
+  await waitFor(() => server.sessionGetCount === 2);
+
+  assert.equal(element("status").textContent, "Ready");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(element("message-input").value, repeatedQuestion);
+  assert.equal(messageRows().length, 1);
+
+  submitMessage(repeatedQuestion);
+  await waitFor(() => server.sendCount === 2);
+  const secondRequest = server.messageSendRequests[1];
+
+  assert.equal(server.attachCount, 1);
+  assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_1"]);
+  assertSameMessageSendRequest(secondRequest, firstRequest, repeatedQuestion);
+});
+
 test("recovery failure after message send response loss re-enables ask controls", async () => {
   const server = installSidePanelHarness({
     closeBeforeSendResponseNumbers: new Set([1]),
@@ -207,6 +239,53 @@ test("side panel reload restores a persisted in-flight session", async () => {
   await waitFor(() => element("ask").disabled === false);
 });
 
+test("side panel reload renders failed restored active turn as terminal error", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
+    sessions: terminalActiveChatSessions("Failed restored question", "failed"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(element("status").textContent, "Codex turn failed");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText().includes("Failed restored question"), true);
+
+  const activeChat = await waitForStoredActiveChat(
+    (value) => currentActiveChatMarker(value)?.activeTurnId === undefined,
+  );
+  assert.equal(currentActiveChatMarker(activeChat).activeTurnId, undefined);
+});
+
+test("side panel reload renders cancelled restored active turn as terminal state", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
+    sessions: terminalActiveChatSessions("Cancelled restored question", "cancelled"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(element("status").textContent, "Cancelled");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText().includes("Cancelled restored question"), true);
+});
+
+test("side panel reload ignores terminal messages from old turns", async () => {
+  const server = installSidePanelHarness({
+    storage: activeChatStorage(activeChatMap(scopedActiveChatMarker())),
+    sessions: terminalActiveChatSessions("Old failed restored question", "failed", "turn_old"),
+  });
+  await importFreshSidePanel();
+  await waitFor(() => server.sessionGetCount === 1);
+
+  assert.equal(element("status").textContent, "Ready");
+  assert.equal(element("ask").disabled, false);
+  assert.equal(element("message-input").disabled, false);
+  assert.equal(transcriptText().includes("Old failed restored question"), true);
+});
+
 test("stored active chat recovery failure re-enables ask controls", async () => {
   const server = installSidePanelHarness({
     failSessionGetNumbers: new Set([1]),
@@ -219,6 +298,117 @@ test("stored active chat recovery failure re-enables ask controls", async () => 
 
   assert.equal(element("message-input").disabled, false);
   assert.equal(element("status").textContent, "Session recovery failed.");
+});
+
+test("message send timeout renders recovered failed turn without retained retry", async () => {
+  const question = "Recover failed message send timeout";
+  const server = installSidePanelHarness({
+    deferSendResponseNumbers: new Set([1]),
+  });
+  const timers = installManualTimers();
+
+  try {
+    await importFreshSidePanelWithMicrotasks();
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 1);
+    const firstRequest = server.messageSendRequests[0];
+
+    server.finishLatestTurn("sess_1", "failed");
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 45_000);
+    timers.fireNext();
+    await waitForMicrotasks(() => element("status").textContent === "Codex turn failed");
+
+    assert.equal(element("status").textContent, "Codex turn failed");
+    assert.equal(element("ask").disabled, false);
+    assert.equal(element("message-input").disabled, false);
+    assert.equal(element("message-input").value, "");
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 2);
+    const secondRequest = server.messageSendRequests[1];
+
+    assert.equal(server.reusedSendCount, 0);
+    assert.equal(server.attachCount, 2);
+    assertDifferentMessageSendRequest(secondRequest, firstRequest);
+  } finally {
+    timers.restore();
+  }
+});
+
+test("message send timeout renders recovered cancelled turn without retained retry", async () => {
+  const question = "Recover cancelled message send timeout";
+  const server = installSidePanelHarness({
+    deferSendResponseNumbers: new Set([1]),
+  });
+  const timers = installManualTimers();
+
+  try {
+    await importFreshSidePanelWithMicrotasks();
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 1);
+    const firstRequest = server.messageSendRequests[0];
+
+    server.finishLatestTurn("sess_1", "cancelled");
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 45_000);
+    timers.fireNext();
+    await waitForMicrotasks(() => element("status").textContent === "Cancelled");
+
+    assert.equal(element("ask").disabled, false);
+    assert.equal(element("message-input").disabled, false);
+    assert.equal(element("message-input").value, "");
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 2);
+    const secondRequest = server.messageSendRequests[1];
+
+    assert.equal(server.reusedSendCount, 0);
+    assert.equal(server.attachCount, 2);
+    assertDifferentMessageSendRequest(secondRequest, firstRequest);
+  } finally {
+    timers.restore();
+  }
+});
+
+test("message send timeout keeps idempotent retry state when recovery fails", async () => {
+  const question = "Retry after message send timeout";
+  const server = installSidePanelHarness({
+    deferSendResponseNumbers: new Set([1]),
+    failSessionGetNumbers: new Set([1]),
+  });
+  const timers = installManualTimers();
+
+  try {
+    await importFreshSidePanelWithMicrotasks();
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 1);
+    const firstRequest = server.messageSendRequests[0];
+
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 45_000);
+
+    timers.fireNext();
+    await waitForMicrotasks(() => element("ask").disabled === false);
+
+    assert.equal(element("message-input").disabled, false);
+    assert.equal(element("status").textContent, "Session recovery failed.");
+    assert.equal(element("message-input").value, question);
+
+    submitMessage(question);
+    await waitForMicrotasks(() => server.sendCount === 2);
+    const secondRequest = server.messageSendRequests[1];
+
+    assert.equal(server.reusedSendCount, 1);
+    assert.equal(server.attachCount, 1);
+    assert.deepEqual(server.sendSessionIds, ["sess_1", "sess_1"]);
+    assertSameMessageSendRequest(secondRequest, firstRequest, question);
+  } finally {
+    timers.restore();
+  }
 });
 
 test("recovery keeps save enabled and ignores delayed stale snapshots after settings change", async () => {

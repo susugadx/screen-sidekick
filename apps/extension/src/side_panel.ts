@@ -3,24 +3,40 @@ import {
   clearActiveChatMarker,
   loadActiveChatMarker,
   saveActiveChatMarker,
-  type ActiveChatMarker,
 } from "./side_panel_active_chat.js";
+import {
+  SidePanelActiveSessionState,
+  type ActiveChatRecoveryGuard,
+} from "./side_panel_active_session.js";
 import { formatSafetySummary, postCaptureToBridge } from "./side_panel_bridge.js";
 import { SidePanelCaptureState } from "./side_panel_capture.js";
 import {
   loadStoredDaemonSettings,
-  parseDaemonSettings,
   storeDaemonSettings,
 } from "./side_panel_daemon_settings.js";
+import {
+  clearSubmittedDraftIfUnchanged as clearSubmittedDraftIfElementsUnchanged,
+  loadSidePanelElements,
+  readDaemonSettingsFromElements,
+  setError as setElementError,
+  setStatus as setElementStatus,
+  updateControlsDisabled as updateElementsControlsDisabled,
+} from "./side_panel_elements.js";
 import {
   PendingSubmittedQuestionState,
   type PendingSubmittedQuestion,
 } from "./side_panel_pending_submission.js";
+import { SidePanelProtocolConnection } from "./side_panel_protocol_connection.js";
+import {
+  isActiveTurnStatus,
+  resolveSessionSnapshot,
+} from "./side_panel_session_snapshot.js";
 import { SidePanelTranscriptView } from "./side_panel_transcript.js";
 import {
   SidekickProtocolError,
   SidekickProtocolClient,
   createMessageSendIdempotencyKey,
+  isMessageSendRequestTimeoutError,
   isTerminalMessageSendReplayError,
   type DaemonSettings,
   type SafetyStatus,
@@ -32,17 +48,8 @@ import {
 
 const captureState = new SidePanelCaptureState();
 const pendingSubmittedQuestions = new PendingSubmittedQuestionState();
-
-let protocolClient: SidekickProtocolClient | null = null;
-let unsubscribeProtocolNotifications: (() => void) | null = null;
-let activeSessionId: string | null = null;
-let activeSessionDaemonUrl: string | null = null;
-let activeSessionDaemonToken: string | null = null;
-let activeChatGeneration = 0;
-let activeTurnId: string | null = null;
-let subscribedSessionId: string | null = null;
-let requestInFlight = false;
-let sessionRecoveryRequired = false;
+const activeSession = new SidePanelActiveSessionState();
+const protocolConnection = new SidePanelProtocolConnection();
 
 type PreparedSubmittedQuestion = {
   client: SidekickProtocolClient;
@@ -51,34 +58,11 @@ type PreparedSubmittedQuestion = {
   safetyStatus?: SafetyStatus;
 };
 
-type ActiveChatRecoveryGuard = {
-  generation: number;
-  sessionId: string;
-  daemonUrl: string;
-  daemonToken: string;
-};
-
 type EnsureActiveSessionOptions = {
   resetStaleSession?: boolean;
 };
 
-const elements = {
-  bridgeForm: requireElement("bridge-form", HTMLFormElement),
-  bridgeUrl: requireElement("bridge-url", HTMLInputElement),
-  bridgeToken: requireElement("bridge-token", HTMLInputElement),
-  saveBridge: requireElement("save-bridge", HTMLButtonElement),
-  messageForm: requireElement("message-form", HTMLFormElement),
-  messageInput: requireElement("message-input", HTMLTextAreaElement),
-  ask: requireElement("ask", HTMLButtonElement),
-  transcript: requireElement("transcript", HTMLDivElement),
-  debugCapture: requireElement("debug-capture", HTMLButtonElement),
-  copyJson: requireElement("copy-json", HTMLButtonElement),
-  copyPrompt: requireElement("copy-prompt", HTMLButtonElement),
-  screenContextJson: requireElement("screen-context-json", HTMLTextAreaElement),
-  promptText: requireElement("prompt-text", HTMLTextAreaElement),
-  safetySummary: requireElement("safety-summary", HTMLPreElement),
-  status: requireElement("status", HTMLSpanElement),
-};
+const elements = loadSidePanelElements();
 const transcriptView = new SidePanelTranscriptView(elements.transcript);
 
 void initialize();
@@ -121,10 +105,13 @@ async function saveDaemonSettings(): Promise<void> {
   const settings = readDaemonSettingsFromInputs();
   await storeDaemonSettings(settings);
 
-  if (protocolClient && !protocolClientMatchesSavedSettings(protocolClient, settings)) {
+  if (!protocolConnection.matches(settings)) {
     disconnectProtocolClient();
   }
-  if (hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings)) {
+  if (
+    activeSession.activeDaemonSettings() &&
+    !activeSession.matchesActiveDaemonIdentity(settings)
+  ) {
     clearActiveChatState();
     await clearActiveChatMarker(captureState.currentGrant());
   }
@@ -177,7 +164,8 @@ async function askCodex(): Promise<void> {
     );
     clearPendingSubmittedQuestion(pendingQuestion);
   } catch (error) {
-    const recoveryRequired = sessionRecoveryRequired;
+    const recoveryRequired = activeSession.sessionRecoveryRequired;
+    const messageSendTimeout = isMessageSendRequestTimeoutError(error);
     if (pendingQuestion && isTerminalMessageSendReplayError(error)) {
       pendingSubmittedQuestions.discard(pendingQuestion);
     } else {
@@ -192,9 +180,9 @@ async function askCodex(): Promise<void> {
         pendingSubmittedQuestions.discard(pendingQuestion);
       }
     }
-    if (recoveryRequired) {
+    if (activeSession.sessionRecoveryRequired) {
       setStatus("Reconnecting to daemon");
-    } else {
+    } else if (!messageSendTimeout && !recoveryRequired) {
       transcriptView.clearActiveAssistantReference();
       setError(error instanceof Error ? error.message : "Ask failed");
     }
@@ -210,7 +198,7 @@ async function prepareSubmittedQuestion(
   const retryQuestion = pendingSubmittedQuestions.findRetryable(
     settings,
     question,
-    activeSessionId,
+    activeSession.sessionId,
   );
   if (retryQuestion) {
     await assertPendingSubmittedQuestionCaptureScopeFresh(retryQuestion);
@@ -310,23 +298,18 @@ async function captureDebugToBridge(): Promise<void> {
 }
 
 async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickProtocolClient> {
-  if (protocolClient?.matches(settings)) {
-    return protocolClient;
-  }
-
   const settingsChanged =
-    hasActiveDaemonIdentity() && !activeDaemonIdentityMatches(settings);
-  disconnectProtocolClient();
+    activeSession.activeDaemonSettings() !== null &&
+    !activeSession.matchesActiveDaemonIdentity(settings);
+  if (!protocolConnection.matches(settings)) {
+    disconnectProtocolClient();
+  }
   if (settingsChanged) {
     clearActiveChatState();
     void clearActiveChatMarker(captureState.currentGrant());
   }
 
-  const version = chrome.runtime.getManifest().version;
-  const client = await SidekickProtocolClient.connect(settings, version);
-  unsubscribeProtocolNotifications = client.onNotification(handleSidekickNotification);
-  protocolClient = client;
-  return client;
+  return protocolConnection.ensure(settings, handleSidekickNotification);
 }
 
 async function ensureActiveSession(
@@ -334,12 +317,12 @@ async function ensureActiveSession(
   settings: DaemonSettings,
   options: EnsureActiveSessionOptions = {},
 ): Promise<string> {
-  if (activeSessionId) {
-    const sessionId = activeSessionId;
-    if (subscribedSessionId !== sessionId) {
+  if (activeSession.sessionId) {
+    const sessionId = activeSession.sessionId;
+    if (activeSession.subscribedSessionId !== sessionId) {
       try {
         await client.subscribeSession(sessionId);
-        subscribedSessionId = sessionId;
+        activeSession.setSubscribedSessionId(sessionId);
         return sessionId;
       } catch (error) {
         if (!options.resetStaleSession || !isSessionNotFoundError(error)) {
@@ -355,10 +338,8 @@ async function ensureActiveSession(
 
   const session = await client.createSession("Screen Sidekick");
   await client.subscribeSession(session.id);
-  activeSessionId = session.id;
-  activeSessionDaemonUrl = settings.url;
-  activeSessionDaemonToken = settings.token;
-  subscribedSessionId = session.id;
+  activeSession.setActiveSession(settings, session.id);
+  activeSession.setSubscribedSessionId(session.id);
   void persistActiveChatMarker();
   return session.id;
 }
@@ -366,29 +347,33 @@ async function ensureActiveSession(
 function handleSidekickNotification(notification: SidekickNotification): void {
   switch (notification.kind) {
     case "turn_delta":
-      transcriptView.appendTurnDelta(notification.turnId, notification.delta, activeTurnId);
+      transcriptView.appendTurnDelta(
+        notification.turnId,
+        notification.delta,
+        activeSession.activeTurnId,
+      );
       return;
     case "turn_completed":
-      if (notification.turn.id === activeTurnId) {
+      if (notification.turn.id === activeSession.activeTurnId) {
         clearActiveTurn();
         setStatus("Ready");
       }
       return;
     case "turn_failed":
-      if (!notification.turn || notification.turn.id === activeTurnId) {
+      if (!notification.turn || notification.turn.id === activeSession.activeTurnId) {
         clearActiveTurn(true);
         setError(notification.message ?? "Codex turn failed");
       }
       return;
     case "turn_cancelled":
-      if (notification.turn.id === activeTurnId) {
+      if (notification.turn.id === activeSession.activeTurnId) {
         clearActiveTurn(true);
         setStatus("Cancelled");
       }
       return;
     case "message_created":
-      if (notification.sessionId === activeSessionId) {
-        appendSessionMessage(notification.message);
+      if (notification.sessionId === activeSession.sessionId) {
+        appendObservedSessionMessage(notification.message);
       }
       return;
     case "error":
@@ -409,7 +394,7 @@ function clearActiveTurn(removeEmptyAssistantPlaceholder = false): void {
 
 function handleProtocolConnectionLost(message: string): void {
   disconnectProtocolClient();
-  if (shouldRecoverActiveSessionOnConnectionLoss()) {
+  if (activeSession.shouldRecoverOnConnectionLoss()) {
     const pendingQuestion = pendingSubmittedQuestions.current();
     if (pendingQuestion) {
       pendingSubmittedQuestions.retainForIdempotentRetry(pendingQuestion);
@@ -428,12 +413,9 @@ async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<v
     return;
   }
 
-  activeSessionId = marker.sessionId;
-  activeSessionDaemonUrl = marker.daemonUrl;
-  activeSessionDaemonToken = marker.daemonToken;
+  activeSession.restoreActiveChatMarker(marker);
   const guard = beginSessionRecovery(settings, marker.sessionId);
   if (marker.activeTurnId) {
-    setActiveTurnId(marker.activeTurnId);
     setStatus("Reconnecting to daemon");
   } else {
     setStatus("Restoring session");
@@ -451,14 +433,14 @@ async function recoverActiveChatFromStorage(settings: DaemonSettings): Promise<v
 }
 
 async function recoverActiveSessionAfterConnectionLoss(fallbackMessage: string): Promise<void> {
-  const sessionId = activeSessionId;
+  const sessionId = activeSession.sessionId;
   if (!sessionId) {
     return;
   }
 
   let guard: ActiveChatRecoveryGuard | null = null;
   try {
-    const settings = activeDaemonSettings();
+    const settings = activeSession.activeDaemonSettings();
     if (!settings) {
       throw new Error(fallbackMessage);
     }
@@ -497,10 +479,11 @@ async function loadAndRenderSessionSnapshot(
   if (snapshot.session.id !== guard.sessionId) {
     throw new Error("Daemon session response did not match requested session");
   }
-  subscribedSessionId = guard.sessionId;
-  activeSessionId = snapshot.session.id;
-  activeSessionDaemonUrl = guard.daemonUrl;
-  activeSessionDaemonToken = guard.daemonToken;
+  activeSession.setSubscribedSessionId(guard.sessionId);
+  activeSession.setActiveSession(
+    { url: guard.daemonUrl, token: guard.daemonToken },
+    snapshot.session.id,
+  );
   renderSessionSnapshot(snapshot, activeTurnSafetyStatus);
   void persistActiveChatMarker();
   return true;
@@ -511,45 +494,58 @@ function beginSessionRecovery(
   sessionId: string,
 ): ActiveChatRecoveryGuard {
   setSessionRecoveryRequired(true);
-  return activeChatGuard(settings, sessionId);
+  return activeSession.beginRecovery(settings, sessionId);
 }
 
 function activeChatGuard(
   settings: DaemonSettings,
   sessionId: string,
 ): ActiveChatRecoveryGuard {
-  return {
-    generation: activeChatGeneration,
-    sessionId,
-    daemonUrl: settings.url,
-    daemonToken: settings.token,
-  };
+  return activeSession.activeChatGuard(settings, sessionId);
 }
 
 function isActiveChatRecoveryCurrent(guard: ActiveChatRecoveryGuard): boolean {
-  return (
-    activeChatGeneration === guard.generation &&
-    activeSessionId === guard.sessionId &&
-    activeSessionDaemonUrl === guard.daemonUrl &&
-    activeSessionDaemonToken === guard.daemonToken
-  );
+  return activeSession.isRecoveryCurrent(guard);
 }
 
 function renderSessionSnapshot(
   snapshot: SidekickSessionSnapshot,
   activeTurnSafetyStatus?: SafetyStatus,
 ): void {
+  const restoredActiveTurnId = activeSession.activeTurnId;
+  const resolution = resolveSessionSnapshot(
+    snapshot,
+    restoredActiveTurnId,
+    pendingSubmittedQuestions.findTerminalMessage(snapshot.messages),
+  );
   transcriptView.renderSnapshotMessages(
     snapshot,
-    activeTurnId,
+    restoredActiveTurnId,
     isActiveTurnStatus,
     clearPendingSubmittedQuestionIfPersisted,
   );
 
-  if (snapshot.activeTurn && isActiveTurnStatus(snapshot.activeTurn.status)) {
-    setActiveTurnId(snapshot.activeTurn.id);
+  if (resolution.kind === "active_turn") {
+    setActiveTurnId(resolution.turn.id);
     transcriptView.ensureAssistantPlaceholder();
     setActiveTurnProgressStatus(activeTurnSafetyStatus);
+    return;
+  }
+
+  if (resolution.kind === "terminal_message" && resolution.status === "failed") {
+    clearSubmittedDraftIfUnchanged(
+      pendingSubmittedQuestions.clearIfTerminalMessage(resolution.message),
+    );
+    clearActiveTurn(true);
+    setError("Codex turn failed");
+    return;
+  }
+  if (resolution.kind === "terminal_message" && resolution.status === "cancelled") {
+    clearSubmittedDraftIfUnchanged(
+      pendingSubmittedQuestions.clearIfTerminalMessage(resolution.message),
+    );
+    clearActiveTurn(true);
+    setStatus("Cancelled");
     return;
   }
 
@@ -557,11 +553,22 @@ function renderSessionSnapshot(
   setStatus("Ready");
 }
 
+function appendObservedSessionMessage(message: SidekickMessage): void {
+  pendingSubmittedQuestions.recordObservedMessage(message);
+  transcriptView.appendSessionMessage(
+    message,
+    undefined,
+    activeSession.activeTurnId,
+    isActiveTurnStatus,
+    () => undefined,
+  );
+}
+
 function appendSessionMessage(message: SidekickMessage, activeTurn?: SidekickTurn): void {
   transcriptView.appendSessionMessage(
     message,
     activeTurn,
-    activeTurnId,
+    activeSession.activeTurnId,
     isActiveTurnStatus,
     clearPendingSubmittedQuestionIfPersisted,
   );
@@ -571,28 +578,9 @@ function setActiveTurnProgressStatus(safetyStatus?: SafetyStatus): void {
   setStatus(safetyStatus === "warning" ? "Review" : "Asking");
 }
 
-function isActiveTurnStatus(status: SidekickTurn["status"]): boolean {
-  return status === "pending" || status === "running";
-}
-
 function disconnectProtocolClient(): void {
-  const client = protocolClient;
-  unsubscribeProtocolNotifications?.();
-  unsubscribeProtocolNotifications = null;
-  protocolClient = null;
-  subscribedSessionId = null;
-  client?.close();
-}
-
-function protocolClientMatchesSavedSettings(
-  client: SidekickProtocolClient,
-  settings: DaemonSettings,
-): boolean {
-  try {
-    return client.matches(settings);
-  } catch {
-    return false;
-  }
+  protocolConnection.disconnect();
+  activeSession.clearSubscribedSession();
 }
 
 async function assertPendingSubmittedQuestionCaptureScopeFresh(
@@ -620,12 +608,7 @@ function clearPendingSubmittedQuestion(pendingQuestion: PendingSubmittedQuestion
 }
 
 function clearSubmittedDraftIfUnchanged(submittedText: string | null): void {
-  if (!submittedText) {
-    return;
-  }
-  if (elements.messageInput.value.trim() === submittedText) {
-    elements.messageInput.value = "";
-  }
+  clearSubmittedDraftIfElementsUnchanged(elements, submittedText);
 }
 
 function handleSessionRecoveryError(error: unknown, fallbackMessage: string): void {
@@ -644,41 +627,18 @@ function isSessionNotFoundError(error: unknown): boolean {
 }
 
 function clearActiveChatState(): void {
-  activeChatGeneration += 1;
-  activeSessionId = null;
-  activeSessionDaemonUrl = null;
-  activeSessionDaemonToken = null;
-  subscribedSessionId = null;
+  activeSession.clearActiveChat();
   pendingSubmittedQuestions.discardCurrent();
-  clearRecoveryBlockingState();
   clearTranscript();
-}
-
-function hasActiveDaemonIdentity(): boolean {
-  return activeSessionDaemonUrl !== null || activeSessionDaemonToken !== null;
-}
-
-function activeDaemonIdentityMatches(settings: DaemonSettings): boolean {
-  return activeSessionDaemonUrl === settings.url && activeSessionDaemonToken === settings.token;
-}
-
-function activeDaemonSettings(): DaemonSettings | null {
-  if (!activeSessionDaemonUrl || !activeSessionDaemonToken) {
-    return null;
-  }
-  return {
-    url: activeSessionDaemonUrl,
-    token: activeSessionDaemonToken,
-  };
-}
-
-function shouldRecoverActiveSessionOnConnectionLoss(): boolean {
-  return activeSessionId !== null && (activeTurnId !== null || requestInFlight);
+  void persistActiveChatMarker();
+  updateControlsDisabled();
 }
 
 function clearRecoveryBlockingState(): void {
-  setSessionRecoveryRequired(false);
-  clearActiveTurn(true);
+  activeSession.clearRecoveryBlockingState();
+  transcriptView.clearActiveAssistant(true);
+  void persistActiveChatMarker();
+  updateControlsDisabled();
 }
 
 function clearTranscript(): void {
@@ -687,82 +647,44 @@ function clearTranscript(): void {
 
 async function persistActiveChatMarker(): Promise<void> {
   const captureGrant = captureState.currentGrant();
-  if (
-    !activeSessionId ||
-    !activeSessionDaemonUrl ||
-    !activeSessionDaemonToken ||
-    !captureGrant
-  ) {
+  const marker = activeSession.toActiveChatMarker(captureGrant);
+  if (!marker) {
     await clearActiveChatMarker(captureGrant);
     return;
-  }
-  const marker: ActiveChatMarker = {
-    daemonUrl: activeSessionDaemonUrl,
-    daemonToken: activeSessionDaemonToken,
-    tabId: captureGrant.tabId,
-    origin: captureGrant.origin,
-    sessionId: activeSessionId,
-  };
-  if (activeTurnId) {
-    marker.activeTurnId = activeTurnId;
   }
   await saveActiveChatMarker(marker);
 }
 
 function readDaemonSettingsFromInputs(): DaemonSettings {
-  const settings = parseDaemonSettings({
-    url: elements.bridgeUrl.value.trim(),
-    token: elements.bridgeToken.value.trim(),
-  });
-  if (!settings) {
-    throw new Error("Daemon URL and pairing token are required");
-  }
-  return settings;
+  return readDaemonSettingsFromElements(elements);
 }
 
 function setRequestInFlight(isBusy: boolean): void {
-  requestInFlight = isBusy;
+  activeSession.setRequestInFlight(isBusy);
   updateControlsDisabled();
 }
 
 function setSessionRecoveryRequired(required: boolean): void {
-  sessionRecoveryRequired = required;
+  activeSession.setSessionRecoveryRequired(required);
   updateControlsDisabled();
 }
 
 function setActiveTurnId(turnId: string | null): void {
-  activeTurnId = turnId;
+  activeSession.setActiveTurnId(turnId);
   void persistActiveChatMarker();
   updateControlsDisabled();
 }
 
 function updateControlsDisabled(): void {
-  const turnActive = activeTurnId !== null;
-  elements.ask.disabled = requestInFlight || turnActive || sessionRecoveryRequired;
-  elements.messageInput.disabled = requestInFlight || turnActive || sessionRecoveryRequired;
-  elements.debugCapture.disabled = requestInFlight;
-  elements.saveBridge.disabled = requestInFlight;
+  updateElementsControlsDisabled(elements, activeSession.toControlState());
 }
 
 function setStatus(text: string): void {
-  elements.status.textContent = text;
-  elements.status.className = "status";
+  setElementStatus(elements, text);
 }
 
 function setError(text: string): void {
-  elements.status.textContent = text;
-  elements.status.className = "status error";
-}
-
-function requireElement<T extends HTMLElement>(
-  id: string,
-  constructor: { new (): T },
-): T {
-  const element = document.getElementById(id);
-  if (!(element instanceof constructor)) {
-    throw new Error(`Missing element: ${id}`);
-  }
-  return element;
+  setElementError(elements, text);
 }
 
 export {};

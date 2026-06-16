@@ -6,10 +6,13 @@ export function installManualTimers() {
   let nextId = 1;
   const timers = new Map();
 
-  globalThis.setTimeout = (callback, _delay, ...args) => {
+  globalThis.setTimeout = (callback, delay, ...args) => {
     const id = nextId;
     nextId += 1;
-    timers.set(id, () => callback(...args));
+    timers.set(id, {
+      callback: () => callback(...args),
+      delay,
+    });
     return id;
   };
   globalThis.clearTimeout = (id) => {
@@ -20,12 +23,17 @@ export function installManualTimers() {
     get size() {
       return timers.size;
     },
+    nextDelay() {
+      const entry = timers.values().next().value;
+      assert.ok(entry, "expected pending timer");
+      return entry.delay;
+    },
     fireNext() {
       const entry = timers.entries().next().value;
       assert.ok(entry, "expected pending timer");
-      const [id, callback] = entry;
+      const [id, timer] = entry;
       timers.delete(id);
-      callback();
+      timer.callback();
     },
     restore() {
       globalThis.setTimeout = previousSetTimeout;

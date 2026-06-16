@@ -36,11 +36,17 @@ type PendingRequest = {
 };
 
 type NotificationHandler = (notification: SidekickNotification) => void;
-type RequestOptions = {
-  timeoutMs?: number;
-};
+type SidekickRequestMethod =
+  | "initialize"
+  | "session/create"
+  | "session/subscribe"
+  | "session/get"
+  | "context/attach_browser"
+  | "message/send";
 
-const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
+const DAEMON_INITIALIZE_TIMEOUT_MS = 60_000;
+const DAEMON_CONTROL_REQUEST_TIMEOUT_MS = 10_000;
+const DAEMON_MESSAGE_SEND_TIMEOUT_MS = 45_000;
 const REQUEST_TOO_LARGE_MESSAGE = "Daemon request is too large for the WebSocket limit.";
 const LEGACY_TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES = new Set([
   "Previous message/send attempt failed.",
@@ -68,7 +74,7 @@ interface MessageSendRequest {
 interface WireRequest {
   jsonrpc: typeof JSONRPC_VERSION;
   id: string;
-  method: string;
+  method: SidekickRequestMethod;
   params: unknown;
 }
 
@@ -145,7 +151,6 @@ export class SidekickProtocolClient {
       "session/subscribe",
       { session_id: sessionId },
       parseIgnoredResult,
-      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
     );
   }
 
@@ -154,7 +159,6 @@ export class SidekickProtocolClient {
       "session/get",
       { session_id: sessionId },
       parseSessionGetResult,
-      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
     );
   }
 
@@ -206,7 +210,6 @@ export class SidekickProtocolClient {
         capabilities: ["browser_context", "chat_stream", "debug_export"],
       },
       parseInitializeResult,
-      { timeoutMs: DAEMON_REQUEST_TIMEOUT_MS },
     );
     this.maxRequestMessageBytes = result.limits.maxMessageBytes;
     if (!result.codexReadiness.available) {
@@ -216,10 +219,9 @@ export class SidekickProtocolClient {
   }
 
   private request<T>(
-    method: string,
+    method: SidekickRequestMethod,
     params: unknown,
     parseResult: (value: unknown) => T | null,
-    options: RequestOptions = {},
   ): Promise<T> {
     if (!this.isOpen()) {
       return Promise.reject(new Error("Daemon WebSocket is not open"));
@@ -240,16 +242,9 @@ export class SidekickProtocolClient {
     }
 
     return new Promise<T>((resolve, reject) => {
-      let timeoutId: number | null = null;
-      if (options.timeoutMs !== undefined) {
-        timeoutId = globalThis.setTimeout(() => {
-          const pending = this.takePending(id);
-          if (!pending) {
-            return;
-          }
-          pending.reject(new Error("Daemon request timed out"));
-        }, options.timeoutMs);
-      }
+      const timeoutId = globalThis.setTimeout(() => {
+        this.handleRequestTimeout(id, method);
+      }, daemonRequestTimeoutMs(method));
       this.pending.set(id, {
         resolve: (value) => {
           const parsed = parseResult(value);
@@ -331,6 +326,20 @@ export class SidekickProtocolClient {
     pending.reject(error);
   }
 
+  private handleRequestTimeout(id: string, method: SidekickRequestMethod): void {
+    const pending = this.takePending(id);
+    if (!pending) {
+      return;
+    }
+    const error = new SidekickRequestTimeoutError(method);
+    pending.reject(error);
+    if (method !== "message/send") {
+      return;
+    }
+    this.reportConnectionLost(error);
+    this.socket.close();
+  }
+
   private dispatchNotification(notification: SidekickNotification): void {
     for (const handler of this.notificationHandlers) {
       handler(notification);
@@ -365,6 +374,30 @@ export class SidekickProtocolClient {
       kind: "connection_lost",
       message: error.message,
     });
+  }
+}
+
+class SidekickRequestTimeoutError extends Error {
+  readonly method: string;
+
+  constructor(method: string) {
+    super("Daemon request timed out");
+    this.name = "SidekickRequestTimeoutError";
+    this.method = method;
+  }
+}
+
+function daemonRequestTimeoutMs(method: SidekickRequestMethod): number {
+  switch (method) {
+    case "initialize":
+      return DAEMON_INITIALIZE_TIMEOUT_MS;
+    case "message/send":
+      return DAEMON_MESSAGE_SEND_TIMEOUT_MS;
+    case "session/create":
+    case "session/subscribe":
+    case "session/get":
+    case "context/attach_browser":
+      return DAEMON_CONTROL_REQUEST_TIMEOUT_MS;
   }
 }
 
@@ -410,6 +443,20 @@ export function isTerminalMessageSendReplayError(error: unknown): boolean {
     error instanceof SidekickProtocolError &&
     (error.messageSendIdempotencyDisposition === "discard" ||
       LEGACY_TERMINAL_MESSAGE_SEND_REPLAY_MESSAGES.has(error.message))
+  );
+}
+
+export function isMessageSendRequestTimeoutError(error: unknown): boolean {
+  if (error instanceof SidekickRequestTimeoutError) {
+    return error.method === "message/send";
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const maybeTimeout = error as Error & { method?: unknown };
+  return (
+    maybeTimeout.name === "SidekickRequestTimeoutError" &&
+    maybeTimeout.method === "message/send"
   );
 }
 

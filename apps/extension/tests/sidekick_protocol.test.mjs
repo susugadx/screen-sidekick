@@ -15,6 +15,8 @@ import {
 import {
   AcceptingServer,
   DelayedMessageSendServer,
+  HangingAttachBrowserContextServer,
+  HangingSessionCreateServer,
   HangingSessionGetServer,
   MalformedInitializeServer,
   MalformedSessionGetServer,
@@ -337,6 +339,7 @@ test("connect times out unanswered initialize and closes websocket", async () =>
     );
     await flushMicrotasks();
     assert.equal(server.socket.sent[0]?.method, "initialize");
+    assert.equal(timers.nextDelay(), 60_000);
 
     const rejected = assert.rejects(connectPromise, /Daemon request timed out/);
     timers.fireNext();
@@ -382,6 +385,7 @@ test("session/get timeout cleans pending state and ignores late response", async
     await flushMicrotasks();
     assert.equal(server.hangingSessionGetId, "sidekick_extension_2");
     assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 10_000);
 
     const rejected = assert.rejects(sessionGetPromise, /Daemon request timed out/);
     timers.fireNext();
@@ -407,7 +411,78 @@ test("session/get timeout cleans pending state and ignores late response", async
   });
 });
 
-test("message/send waits for delayed response without local request timeout", async () => {
+test("session/create timeout cleans pending state and ignores late response", async () => {
+  const { client, server } = await connectProtocolClient(new HangingSessionCreateServer());
+  const timers = installManualTimers();
+
+  try {
+    const createPromise = client.createSession("Hung create");
+    await flushMicrotasks();
+    assert.equal(server.hangingSessionCreateId, "sidekick_extension_2");
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 10_000);
+
+    const rejected = assert.rejects(createPromise, /Daemon request timed out/);
+    timers.fireNext();
+    await rejected;
+
+    server.socket.receiveSuccess(server.hangingSessionCreateId, {
+      session: {
+        id: "sess_late_create",
+        title: "Late create",
+      },
+    });
+  } finally {
+    timers.restore();
+  }
+
+  const snapshot = await client.getSession("sess_1");
+  assert.equal(snapshot.session.id, "sess_1");
+  assert.deepEqual(snapshot.messages, []);
+});
+
+test("context/attach_browser timeout cleans pending state and ignores late response", async () => {
+  const { client, server } = await connectProtocolClient(
+    new HangingAttachBrowserContextServer(),
+  );
+  const timers = installManualTimers();
+
+  try {
+    const attachPromise = client.attachBrowserContext(
+      "sess_1",
+      { schema_version: "raw_browser_context.v0.1" },
+      "manual_attach",
+    );
+    await flushMicrotasks();
+    assert.equal(server.hangingAttachBrowserContextId, "sidekick_extension_2");
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 10_000);
+
+    const rejected = assert.rejects(attachPromise, /Daemon request timed out/);
+    timers.fireNext();
+    await rejected;
+
+    server.socket.receiveSuccess(server.hangingAttachBrowserContextId, {
+      attachment: {
+        id: "att_late",
+        session_id: "sess_1",
+        summary: "Late attach",
+        safety_status: "clean",
+        debug_available: false,
+      },
+    });
+  } finally {
+    timers.restore();
+  }
+
+  const session = await client.createSession("After attach timeout");
+  assert.deepEqual(session, {
+    id: "sess_after_attach_timeout",
+    title: "After attach timeout",
+  });
+});
+
+test("message/send clears side-effect timeout when delayed response succeeds", async () => {
   const { client, server } = await connectProtocolClient(new DelayedMessageSendServer());
   const timers = installManualTimers();
 
@@ -424,7 +499,8 @@ test("message/send waits for delayed response without local request timeout", as
     assert.equal(server.delayedMessageSendId, "sidekick_extension_2");
     assert.equal(server.delayedMessageSendParams.idempotency_key, "idem_from_caller");
     assert.deepEqual(server.delayedMessageSendParams.attachment_ids, ["att_1"]);
-    assert.equal(timers.size, 0);
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 45_000);
     assert.equal(settled, false);
 
     server.releaseMessageSend();
@@ -434,6 +510,48 @@ test("message/send waits for delayed response without local request timeout", as
       reused: false,
     });
     assert.equal(settled, true);
+    assert.equal(timers.size, 0);
+  } finally {
+    timers.restore();
+  }
+});
+
+test("message/send timeout reports connection lost once and closes socket", async () => {
+  const { client, server } = await connectProtocolClient(new DelayedMessageSendServer());
+  const timers = installManualTimers();
+  const notifications = [];
+  client.onNotification((notification) => notifications.push(notification));
+
+  try {
+    const sendPromise = client.sendMessage(
+      "sess_1",
+      "Slow question",
+      "idem_from_caller",
+      ["att_1"],
+      "ask_only",
+    );
+    await flushMicrotasks();
+
+    assert.equal(server.delayedMessageSendId, "sidekick_extension_2");
+    assert.equal(timers.size, 1);
+    assert.equal(timers.nextDelay(), 45_000);
+
+    const rejected = assert.rejects(sendPromise, /Daemon request timed out/);
+    timers.fireNext();
+    await rejected;
+
+    assert.deepEqual(notifications, [
+      {
+        kind: "connection_lost",
+        message: "Daemon request timed out",
+      },
+    ]);
+    assert.equal(server.socket.closeCount, 1);
+    assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
+    assert.equal(timers.size, 0);
+
+    server.releaseMessageSend();
+    assert.equal(notifications.length, 1);
   } finally {
     timers.restore();
   }
@@ -441,17 +559,23 @@ test("message/send waits for delayed response without local request timeout", as
 
 test("oversized outgoing request is rejected locally before websocket send", async () => {
   const { client, server } = await connectProtocolClient(new SmallMessageLimitServer());
+  const timers = installManualTimers();
 
-  await assert.rejects(
-    () => client.sendMessage("sess_1", "x".repeat(512), "idem_large", [], "ask_only"),
-    (error) => {
-      assert.ok(error instanceof Error);
-      assert.equal(error.name, "SidekickProtocolError");
-      assert.equal(error.code, "payload_too_large");
-      assert.equal(error.message, "Daemon request is too large for the WebSocket limit.");
-      return true;
-    },
-  );
+  try {
+    await assert.rejects(
+      () => client.sendMessage("sess_1", "x".repeat(512), "idem_large", [], "ask_only"),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.name, "SidekickProtocolError");
+        assert.equal(error.code, "payload_too_large");
+        assert.equal(error.message, "Daemon request is too large for the WebSocket limit.");
+        return true;
+      },
+    );
+    assert.equal(timers.size, 0);
+  } finally {
+    timers.restore();
+  }
 
   assert.equal(server.messageSendCount, 0);
   assert.equal(server.socket.sent.some((request) => request.method === "message/send"), false);
