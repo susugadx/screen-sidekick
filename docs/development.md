@@ -37,10 +37,16 @@ or restart the terminal.
 
 ## Checks
 
-Run all checks:
+Run the local quick gate:
 
 ```sh
 make check
+```
+
+Run the full CI gate:
+
+```sh
+make ci-check
 ```
 
 Or run individual checks:
@@ -54,6 +60,8 @@ make extension-build
 make extension-test
 make extension-manifest-check
 make desktop-bridge-test
+make desktop-check
+make desktop-ui-check
 ```
 
 The desktop bridge handler tests avoid Tauri system webview dependencies:
@@ -75,4 +83,24 @@ The Leptos UI check requires Trunk or a wasm target check:
 rustup target add wasm32-unknown-unknown
 cargo check --manifest-path apps/desktop/ui/Cargo.toml --target wasm32-unknown-unknown
 trunk build apps/desktop/ui/index.html --release --dist apps/desktop/ui/dist
+```
+
+## CI
+
+GitHub Actions runs the `CI` workflow for pull requests and pushes to `main`.
+The required branch protection checks should be the normal `CI` workflow jobs:
+
+- `check`
+- `whitespace`
+
+The `check` job runs `make ci-check`, which includes the local quick gate plus
+the desktop Tauri check and the desktop UI wasm check. The `whitespace` job runs
+`git diff --check` against the pull request or push diff.
+
+Codex app-server schema drift is intentionally separate from the required PR
+gate. Use the manual `Codex Schema` workflow, or run the explicit developer
+command locally:
+
+```sh
+make codex-schema-check
 ```

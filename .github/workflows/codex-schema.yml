@@ -1,0 +1,55 @@
+name: Codex Schema
+
+on:
+  workflow_dispatch:
+    inputs:
+      codex_version:
+        description: "Codex CLI npm version. Defaults to crates/codex-client/schema/metadata.json."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-schema-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: schema
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Resolve Codex CLI version
+        id: codex-version
+        env:
+          INPUT_CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          if [ -n "$INPUT_CODEX_VERSION" ]; then
+            version="$INPUT_CODEX_VERSION"
+          else
+            version="$(node -e 'const fs = require("fs"); const metadata = JSON.parse(fs.readFileSync("crates/codex-client/schema/metadata.json", "utf8")); console.log(metadata.codex_cli_version);')"
+          fi
+
+          version="${version#codex-cli }"
+          if [ -z "$version" ]; then
+            echo "Codex CLI version is empty" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Codex CLI
+        run: npm install -g "@openai/codex@${{ steps.codex-version.outputs.version }}"
+
+      - name: Check schema drift
+        run: make codex-schema-check
