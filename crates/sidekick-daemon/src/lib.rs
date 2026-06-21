@@ -34,6 +34,8 @@ use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
+pub use protocol::{ProtocolConnection, ProtocolConnectionAuth};
+
 pub const DAEMON_STATUS_SCHEMA_VERSION: &str = "sidekick_daemon_status.v0.1";
 pub const MAX_CAPTURE_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
@@ -83,6 +85,14 @@ impl Default for DaemonOptions {
 }
 
 impl DaemonState {
+    pub fn default_runtime_state() -> Result<Self, DaemonStartError> {
+        let token = Uuid::new_v4().to_string();
+        let db_path = default_database_path().map_err(DaemonStartError::DatabasePath)?;
+        let store = SessionStore::open(db_path).map_err(DaemonStartError::SessionStore)?;
+        let codex = Arc::new(StdioCodexClient::default());
+        Ok(Self::new(token, store, codex))
+    }
+
     #[must_use]
     pub fn new(
         token: impl Into<String>,
@@ -119,6 +129,10 @@ impl DaemonState {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    pub fn recover_interrupted_turns(&self) -> Result<(), SessionStoreError> {
+        self.store.recover_interrupted_active_turns().map(|_| ())
+    }
 }
 
 pub struct DaemonRuntime {
@@ -138,8 +152,7 @@ impl DaemonRuntime {
 
     pub fn start_with_state(state: DaemonState) -> Result<(Self, DaemonStatus), DaemonStartError> {
         state
-            .store
-            .recover_interrupted_active_turns()
+            .recover_interrupted_turns()
             .map_err(DaemonStartError::SessionStore)?;
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(DaemonStartError::Bind)?;

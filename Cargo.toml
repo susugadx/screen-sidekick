@@ -10,6 +10,7 @@ members = [
   "crates/session",
   "crates/codex-client",
   "crates/sidekick-daemon",
+  "crates/sidekick-native-host",
 ]
 exclude = [
   "apps/desktop/src-tauri",
@@ -31,6 +32,7 @@ screen-sidekick-sidekick-protocol = { path = "crates/sidekick-protocol" }
 screen-sidekick-session = { path = "crates/session" }
 screen-sidekick-codex-client = { path = "crates/codex-client" }
 screen-sidekick-sidekick-daemon = { path = "crates/sidekick-daemon" }
+screen-sidekick-native-host = { path = "crates/sidekick-native-host" }
 async-trait = "0.1"
 axum = { version = "0.8.9", features = ["ws"] }
 directories = "6"
@@ -41,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { version = "1.52.3", features = ["io-std", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tokio-tungstenite = "0.29"
 url = "2"

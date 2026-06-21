@@ -5,6 +5,7 @@ import { flushMicrotasks, installManualTimers } from "./manual_timers.mjs";
 import {
   SidekickProtocolClient,
   SidekickProtocolError,
+  NativeMessagingSidekickClient,
   buildDaemonCaptureUrl,
   buildDaemonWebSocketUrl,
   isTerminalMessageSendReplayError,
@@ -26,6 +27,7 @@ import {
   UnansweredInitializeServer,
   UnavailableInitializeServer,
   connectProtocolClient,
+  installProtocolNativeMessaging,
   installProtocolWebSocket,
 } from "./support/protocol_harness.mjs";
 
@@ -284,6 +286,69 @@ test("connect closes websocket when initialize is rejected", async () => {
     assert.equal(server.socket.readyState, ProtocolFakeWebSocket.CLOSED);
   } finally {
     restoreWebSocket();
+  }
+});
+
+test("native messaging connect sends initialize without pairing token", async () => {
+  const server = new AcceptingServer();
+  const restoreNativeMessaging = installProtocolNativeMessaging(server);
+
+  try {
+    const client = await NativeMessagingSidekickClient.connect("test");
+
+    assert.equal(server.socket.sent[0]?.method, "initialize");
+    assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+    assert.equal(server.socket.sent[0]?.params.extension_id, "abcdefghijklmnopabcdefghijklmnop");
+    assert.equal(
+      server.socket.sent[0]?.params.origin,
+      "chrome-extension://abcdefghijklmnopabcdefghijklmnop/",
+    );
+    client.close();
+  } finally {
+    restoreNativeMessaging();
+  }
+});
+
+test("native messaging connect maps unavailable host to setup error", async () => {
+  const server = new AcceptingServer();
+  const restoreNativeMessaging = installProtocolNativeMessaging(server, {
+    connectThrows: true,
+  });
+
+  try {
+    await assert.rejects(
+      () => NativeMessagingSidekickClient.connect("test"),
+      /Screen Sidekick native host is not installed/,
+    );
+  } finally {
+    restoreNativeMessaging();
+  }
+});
+
+test("native messaging disconnect reports sanitized connection lost once", async () => {
+  const server = new AcceptingServer();
+  const restoreNativeMessaging = installProtocolNativeMessaging(server, {
+    disconnectMessage:
+      "Access to the specified native messaging host is forbidden. token=SECRET",
+  });
+
+  try {
+    const client = await NativeMessagingSidekickClient.connect("test");
+    const notifications = [];
+    client.onNotification((notification) => notifications.push(notification));
+
+    server.socket.disconnect();
+    server.socket.disconnect();
+
+    assert.deepEqual(notifications, [
+      {
+        kind: "connection_lost",
+        message: "Screen Sidekick native host is not allowed for this extension ID.",
+      },
+    ]);
+    assert.equal(JSON.stringify(notifications).includes("SECRET"), false);
+  } finally {
+    restoreNativeMessaging();
   }
 });
 

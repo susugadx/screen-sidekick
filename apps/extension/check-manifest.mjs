@@ -14,7 +14,14 @@ if (manifest.side_panel?.default_path !== "side_panel.html") {
   throw new Error("side panel default path must be side_panel.html");
 }
 
-for (const permission of ["activeTab", "scripting", "sidePanel", "storage", "tabs"]) {
+for (const permission of [
+  "activeTab",
+  "nativeMessaging",
+  "scripting",
+  "sidePanel",
+  "storage",
+  "tabs",
+]) {
   if (!manifest.permissions?.includes(permission)) {
     throw new Error(`missing permission: ${permission}`);
   }

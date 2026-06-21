@@ -1,11 +1,17 @@
 export {
+  NATIVE_CONNECTION_SETTINGS,
+  NATIVE_HOST_NAME,
+  NativeMessagingSidekickClient,
   SidekickProtocolClient,
+  WebSocketSidekickClient,
   buildDaemonCaptureUrl,
   buildDaemonWebSocketUrl,
   createMessageSendIdempotencyKey,
+  isNativeConnectionSettings,
   isMessageSendRequestTimeoutError,
   isTerminalMessageSendReplayError,
 } from "./sidekick_protocol/client.js";
+export type { SidekickClient } from "./sidekick_protocol/client.js";
 export {
   parseInitializeResult,
   parseSidekickNotification,

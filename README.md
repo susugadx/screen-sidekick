@@ -8,9 +8,9 @@ repository editor. The app captures and normalizes screen context, previews
 safety-sensitive information, and generates a handoff that a user can pass to
 Codex.
 
-## Phase 0-B Status
+## Current Status
 
-This repository contains the first vertical slice:
+This repository contains the browser chat vertical slice:
 
 - Rust workspace for core domain crates.
 - `RawScreenContext` / `ScreenContext v0.1` typed payloads.
@@ -18,12 +18,18 @@ This repository contains the first vertical slice:
 - Prompt preview generation from a `SanitizedScreenContext`.
 - `capture-pipeline` for `raw_browser_context.v0.1` browser captures,
   sanitized ScreenContext JSON, safety summary, and prompt response generation.
-- Tauri v2 desktop bridge status shell in `apps/desktop`.
-- Chrome/Edge side panel adapter in `apps/extension`.
+- `sidekick-daemon` for session state, sanitized attachment storage, and Codex
+  app-server turn streaming.
+- `sidekick-native-host` for the Chrome/Edge Native Messaging host.
+- Chrome/Edge side panel adapter in `apps/extension`, using Native Messaging as
+  the primary chat transport.
+- Tauri v2 desktop bridge/status shell in `apps/desktop` for debug and fallback
+  workflows.
 
-Phase 0-B uses a loopback HTTP bridge for local validation. It does not add
-browser automation, MCP execution, Computer Use, local repository editing, or
-automatic Codex submission.
+The legacy loopback WebSocket / HTTP bridge remains available for development
+fallback and debug capture. Screen Sidekick still does not add browser
+automation, MCP execution, Computer Use, local repository editing, or automatic
+Codex actions.
 
 ## Repository Layout
 
@@ -33,8 +39,10 @@ crates/safety-rules    pure danger detection and text/URL redaction policy
 crates/safety          SafetyReview and SanitizedScreenContext owner
 crates/prompt          Codex-ready prompt preview owner; consumes safety-reviewed context
 crates/capture-pipeline raw browser capture DTO and sanitized side panel response owner
-apps/desktop           Tauri + Leptos bridge status shell and loopback bridge transport
-apps/extension         Chrome/Edge side panel adapter
+crates/sidekick-daemon session, attachment, Codex app-server, and shared protocol execution
+crates/sidekick-native-host Chrome/Edge Native Messaging framing and host lifecycle
+apps/desktop           Tauri + Leptos status/debug shell and loopback fallback transport
+apps/extension         Chrome/Edge side panel adapter and transport adapters
 docs/                  architecture and non-executor boundary notes
 ```
 
@@ -49,4 +57,5 @@ make check
 ```
 
 See [docs/development.md](docs/development.md) for the full setup notes.
-See [docs/phase-0-b.md](docs/phase-0-b.md) for bridge and extension run notes.
+See [apps/extension/README.md](apps/extension/README.md) for Native Messaging
+development setup.

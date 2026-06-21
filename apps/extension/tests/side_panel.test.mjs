@@ -19,6 +19,64 @@ import {
   waitForStoredActiveChat,
 } from "./support/side_panel_harness.mjs";
 
+test("uses native messaging as the default ask transport without daemon settings", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  submitMessage("Native question");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question");
+});
+
+test("uses native messaging for ask when only fallback daemon URL is filled", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  element("bridge-url").value = "ws://127.0.0.1:43001/v0/ws";
+  submitMessage("Native question with URL only");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.notEqual(element("status").textContent, "Daemon URL and pairing token are required");
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question with URL only");
+});
+
+test("uses native messaging for ask when only fallback pairing token is filled", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  element("bridge-token").value = "pairing-token";
+  submitMessage("Native question with token only");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.notEqual(element("status").textContent, "Daemon URL and pairing token are required");
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question with token only");
+});
+
 test("keeps ask controls disabled after message send response until turn completes", async () => {
   const server = installSidePanelHarness();
   await importFreshSidePanel();

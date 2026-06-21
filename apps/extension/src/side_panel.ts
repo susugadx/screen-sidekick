@@ -34,12 +34,14 @@ import {
 import { SidePanelTranscriptView } from "./side_panel_transcript.js";
 import {
   SidekickProtocolError,
-  SidekickProtocolClient,
+  NATIVE_CONNECTION_SETTINGS,
   createMessageSendIdempotencyKey,
+  isNativeConnectionSettings,
   isMessageSendRequestTimeoutError,
   isTerminalMessageSendReplayError,
   type DaemonSettings,
   type SafetyStatus,
+  type SidekickClient,
   type SidekickMessage,
   type SidekickNotification,
   type SidekickSessionSnapshot,
@@ -52,7 +54,8 @@ const activeSession = new SidePanelActiveSessionState();
 const protocolConnection = new SidePanelProtocolConnection();
 
 type PreparedSubmittedQuestion = {
-  client: SidekickProtocolClient;
+  client: SidekickClient;
+  settings: DaemonSettings;
   sessionId: string;
   pendingQuestion: PendingSubmittedQuestion;
   safetyStatus?: SafetyStatus;
@@ -96,7 +99,8 @@ async function initialize(): Promise<void> {
   clearPreviewState(elements);
   updateControlsDisabled();
   setStatus("Idle");
-  if (settings) {
+  await recoverActiveChatFromStorage(NATIVE_CONNECTION_SETTINGS);
+  if (settings && !activeSession.sessionId) {
     await recoverActiveChatFromStorage(settings);
   }
 }
@@ -105,11 +109,15 @@ async function saveDaemonSettings(): Promise<void> {
   const settings = readDaemonSettingsFromInputs();
   await storeDaemonSettings(settings);
 
-  if (!protocolConnection.matches(settings)) {
-    disconnectProtocolClient();
+  const activeSettings = activeSession.activeDaemonSettings();
+  if (!activeSettings || !isNativeConnectionSettings(activeSettings)) {
+    if (!protocolConnection.matches(settings)) {
+      disconnectProtocolClient();
+    }
   }
   if (
-    activeSession.activeDaemonSettings() &&
+    activeSettings &&
+    !isNativeConnectionSettings(activeSettings) &&
     !activeSession.matchesActiveDaemonIdentity(settings)
   ) {
     clearActiveChatState();
@@ -129,8 +137,8 @@ async function askCodex(): Promise<void> {
 
   let pendingQuestion: PendingSubmittedQuestion | null = null;
   try {
-    const settings = readDaemonSettingsFromInputs();
-    const submittedQuestion = await prepareSubmittedQuestion(settings, question);
+    const fallbackSettings = readOptionalDaemonSettingsFromInputs();
+    const submittedQuestion = await prepareSubmittedQuestion(fallbackSettings, question);
     pendingQuestion = submittedQuestion.pendingQuestion;
     const sendResult = await submittedQuestion.client.sendMessage(
       submittedQuestion.sessionId,
@@ -147,7 +155,7 @@ async function askCodex(): Promise<void> {
     if (sendResult.reused) {
       const applied = await loadAndRenderSessionSnapshot(
         submittedQuestion.client,
-        activeChatGuard(settings, submittedQuestion.sessionId),
+        activeChatGuard(submittedQuestion.settings, submittedQuestion.sessionId),
         submittedQuestion.safetyStatus,
       );
       if (applied) {
@@ -192,22 +200,25 @@ async function askCodex(): Promise<void> {
 }
 
 async function prepareSubmittedQuestion(
-  settings: DaemonSettings,
+  fallbackSettings: DaemonSettings | null,
   question: string,
 ): Promise<PreparedSubmittedQuestion> {
-  const retryQuestion = pendingSubmittedQuestions.findRetryable(
-    settings,
-    question,
-    activeSession.sessionId,
-  );
-  if (retryQuestion) {
+  const activeSettings = activeSession.activeDaemonSettings();
+  const retryQuestion = activeSettings
+    ? pendingSubmittedQuestions.findRetryable(
+        activeSettings,
+        question,
+        activeSession.sessionId,
+      )
+    : null;
+  if (retryQuestion && activeSettings) {
     await assertPendingSubmittedQuestionCaptureScopeFresh(retryQuestion);
     pendingSubmittedQuestions.retainForIdempotentRetry(retryQuestion);
     setStatus("Asking");
-    const client = await ensureProtocolClient(settings);
+    const client = await ensureProtocolClient(activeSettings);
     let sessionId: string;
     try {
-      sessionId = await ensureActiveSession(client, settings);
+      sessionId = await ensureActiveSession(client, activeSettings);
     } catch (error) {
       if (isSessionNotFoundError(error)) {
         pendingSubmittedQuestions.discard(retryQuestion);
@@ -218,6 +229,7 @@ async function prepareSubmittedQuestion(
     }
     return {
       client,
+      settings: activeSettings,
       sessionId,
       pendingQuestion: retryQuestion,
       safetyStatus: retryQuestion.safetyStatus,
@@ -226,7 +238,9 @@ async function prepareSubmittedQuestion(
 
   setStatus("Capturing");
   const capturedContext = await captureState.captureActiveTabContextWithGrant();
-  const client = await ensureProtocolClient(settings);
+  const connected = await ensurePreferredProtocolClient(fallbackSettings);
+  const client = connected.client;
+  const settings = connected.settings;
   const sessionId = await ensureActiveSession(client, settings, {
     resetStaleSession: true,
   });
@@ -249,6 +263,7 @@ async function prepareSubmittedQuestion(
   pendingSubmittedQuestions.set(pendingQuestion);
   return {
     client,
+    settings,
     sessionId,
     pendingQuestion,
     safetyStatus: attachment.safetyStatus,
@@ -297,7 +312,24 @@ async function captureDebugToBridge(): Promise<void> {
   }
 }
 
-async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickProtocolClient> {
+async function ensurePreferredProtocolClient(
+  fallbackSettings: DaemonSettings | null,
+): Promise<{ client: SidekickClient; settings: DaemonSettings }> {
+  const connected = await protocolConnection.ensurePreferred(
+    fallbackSettings,
+    handleSidekickNotification,
+  );
+  if (
+    activeSession.activeDaemonSettings() !== null &&
+    !activeSession.matchesActiveDaemonIdentity(connected.settings)
+  ) {
+    clearActiveChatState();
+    void clearActiveChatMarker(captureState.currentGrant());
+  }
+  return connected;
+}
+
+async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickClient> {
   const settingsChanged =
     activeSession.activeDaemonSettings() !== null &&
     !activeSession.matchesActiveDaemonIdentity(settings);
@@ -309,11 +341,11 @@ async function ensureProtocolClient(settings: DaemonSettings): Promise<SidekickP
     void clearActiveChatMarker(captureState.currentGrant());
   }
 
-  return protocolConnection.ensure(settings, handleSidekickNotification);
+  return (await protocolConnection.ensure(settings, handleSidekickNotification)).client;
 }
 
 async function ensureActiveSession(
-  client: SidekickProtocolClient,
+  client: SidekickClient,
   settings: DaemonSettings,
   options: EnsureActiveSessionOptions = {},
 ): Promise<string> {
@@ -456,7 +488,7 @@ async function recoverActiveSessionAfterConnectionLoss(fallbackMessage: string):
 }
 
 async function recoverSessionSnapshot(
-  client: SidekickProtocolClient,
+  client: SidekickClient,
   guard: ActiveChatRecoveryGuard,
 ): Promise<void> {
   await client.subscribeSession(guard.sessionId);
@@ -468,7 +500,7 @@ async function recoverSessionSnapshot(
 }
 
 async function loadAndRenderSessionSnapshot(
-  client: SidekickProtocolClient,
+  client: SidekickClient,
   guard: ActiveChatRecoveryGuard,
   activeTurnSafetyStatus?: SafetyStatus,
 ): Promise<boolean> {
@@ -657,6 +689,12 @@ async function persistActiveChatMarker(): Promise<void> {
 
 function readDaemonSettingsFromInputs(): DaemonSettings {
   return readDaemonSettingsFromElements(elements);
+}
+
+function readOptionalDaemonSettingsFromInputs(): DaemonSettings | null {
+  const hasUrl = elements.bridgeUrl.value.trim().length > 0;
+  const hasToken = elements.bridgeToken.value.trim().length > 0;
+  return hasUrl && hasToken ? readDaemonSettingsFromInputs() : null;
 }
 
 function setRequestInFlight(isBusy: boolean): void {

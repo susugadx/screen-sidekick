@@ -1,16 +1,17 @@
 # Desktop App
 
-This directory contains the Phase 0-B Tauri v2 + Leptos desktop shell.
+This directory contains the Tauri v2 + Leptos desktop shell.
 
 The desktop app remains a local UI and bridge boundary around the Rust domain
-crates. It displays bridge URL/token/status and starts the loopback capture
-bridge. It does not capture the desktop, automate the browser, or send prompts
-to Codex.
+crates. Native Messaging is the normal browser Ask path, so the desktop window
+is not required for routine extension chat. The desktop app remains useful for
+status, debug, and explicit WebSocket / loopback fallback workflows. It does not
+capture the desktop, automate the browser, or send prompts to Codex.
 
 ## Boundaries
 
-- `src-tauri/` owns Tauri commands, loopback HTTP transport, auth, CORS, and
-  body limits.
+- `src-tauri/` owns Tauri commands, loopback HTTP/WebSocket fallback startup,
+  auth, CORS, and body limits.
 - `ui/` owns Leptos UI rendering and transient presentation state.
 - Domain rules, safety policy, masking, prompt generation, and handoff package
   generation stay in Rust crates under `crates/`.

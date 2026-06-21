@@ -30,6 +30,28 @@ export function installProtocolWebSocket(server) {
   };
 }
 
+export function installProtocolNativeMessaging(server, options = {}) {
+  const previousChrome = globalThis.chrome;
+  const runtime = {
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    lastError: undefined,
+    connectNative(name) {
+      if (options.connectThrows) {
+        throw new Error("native host missing");
+      }
+      if (name !== "com.screen_sidekick.host") {
+        throw new Error(`unexpected native host name: ${name}`);
+      }
+      return new ProtocolFakeNativePort(server, runtime, options);
+    },
+  };
+  globalThis.chrome = { runtime };
+
+  return () => {
+    globalThis.chrome = previousChrome;
+  };
+}
+
 export class AcceptingServer {
   socket = null;
 
@@ -355,5 +377,79 @@ export class ProtocolFakeWebSocket {
         return !once;
       }),
     );
+  }
+}
+
+export class ProtocolFakeNativePort {
+  constructor(server, runtime, options = {}) {
+    this.server = server;
+    this.runtime = runtime;
+    this.disconnectMessage = options.disconnectMessage ?? "";
+    this.sent = [];
+    this.disconnected = false;
+    this.onMessage = new FakeChromeEvent();
+    this.onDisconnect = new FakeChromeEvent();
+    server.socket = this;
+  }
+
+  postMessage(request) {
+    this.sent.push(request);
+    this.server.handle(this, request);
+  }
+
+  disconnect() {
+    if (this.disconnected) {
+      return;
+    }
+    this.disconnected = true;
+    if (this.disconnectMessage) {
+      this.runtime.lastError = { message: this.disconnectMessage };
+    }
+    this.onDisconnect.dispatch();
+    this.runtime.lastError = undefined;
+  }
+
+  close() {
+    this.disconnect();
+  }
+
+  receiveFailure(id, code, message, data = undefined) {
+    this.receive({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code,
+        message,
+        ...(data === undefined ? {} : { data }),
+      },
+    });
+  }
+
+  receiveSuccess(id, result) {
+    this.receive({
+      jsonrpc: "2.0",
+      id,
+      result,
+    });
+  }
+
+  receive(value) {
+    this.onMessage.dispatch(value);
+  }
+}
+
+class FakeChromeEvent {
+  constructor() {
+    this.listeners = [];
+  }
+
+  addListener(listener) {
+    this.listeners.push(listener);
+  }
+
+  dispatch(value) {
+    for (const listener of this.listeners) {
+      listener(value);
+    }
   }
 }
