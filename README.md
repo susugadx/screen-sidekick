@@ -1,12 +1,11 @@
 # Screen Sidekick
 
-Screen Sidekick is a Rust-first local application for packaging visual context for
-existing Codex workflows.
+Screen Sidekick is a Rust-first local screen assistant for Codex users.
 
 It is not a Codex replacement, browser automation agent, MCP runner, or local
-repository editor. The app captures and normalizes screen context, previews
-safety-sensitive information, and generates a handoff that a user can pass to
-Codex.
+repository editor. The app helps a user ask about the browser page or local
+desktop screen they are looking at, then bridges that screen context into Codex
+developer workflows when deeper repo work is needed.
 
 ## Current Status
 
@@ -27,9 +26,10 @@ This repository contains the browser chat vertical slice:
   workflows.
 
 The legacy loopback WebSocket / HTTP bridge remains available for development
-fallback and debug capture. Screen Sidekick still does not add browser
-automation, MCP execution, Computer Use, local repository editing, or automatic
-Codex actions.
+fallback and debug capture. Screen Sidekick can grow toward confirmed
+browser/desktop actions, but it still must not perform browser automation, MCP
+execution, Computer Use, local repository editing, or automatic Codex actions
+without an explicit user confirmation boundary and a separate owner.
 
 ## Repository Layout
 
@@ -59,3 +59,45 @@ make check
 See [docs/development.md](docs/development.md) for the full setup notes.
 See [apps/extension/README.md](apps/extension/README.md) for Native Messaging
 development setup.
+
+## Product Direction
+
+The product center is assistant-first:
+
+```text
+Browser page or local desktop screen
+  -> summon Screen Sidekick
+  -> ask "what is this?", "what should I do next?", or "is this safe?"
+  -> get an explanation, next-step guidance, and risk notes
+  -> bridge to Codex / repo work only when the task needs local development context
+```
+
+The next product tranche should improve the assistant answer style before adding
+automation: explain the meaning of the current screen, avoid reading text back
+verbatim, suggest the next step, and flag risky actions.
+
+See [docs/codex-companion-direction.md](docs/codex-companion-direction.md) for
+the assistant-first direction.
+
+## Next Setup Work
+
+The next setup tranche is a local alpha installer, not store publication. This
+supports the assistant direction by making the local Native Messaging / WSL /
+Codex path repeatable on the developer machine.
+
+Goal: make this developer machine recoverable with one setup command before
+adding more local invocation features. That command should build/copy the
+Windows native host, build the WSL daemon and extension, register the
+browser-specific Native Messaging manifest for the exact extension ID, write the
+WSL auto-start config, run a setup doctor/smoke check, and provide uninstall.
+
+Planned local commands:
+
+```sh
+npm run sidekick:install-local -- --browser edge
+npm run sidekick:doctor-local -- --browser edge
+npm run sidekick:uninstall-local -- --browser edge
+```
+
+Store publication, code signing, and a formal Windows installer are later
+distribution work. Keep them separate until the local setup path is repeatable.

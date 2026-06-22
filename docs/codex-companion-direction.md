@@ -30,6 +30,25 @@ Zed / terminal / Windows 画面を見る
 
 `screen_context_json` や `prompt_text` は主 UI ではなく、裏側の artifact / debug view / export として扱う。
 
+## 2026-06-22 Clarification: Assistant First
+
+この方向性の主語は `Codex bridge` ではなく、召喚できるローカル画面アシスタントである。
+
+欲しい体験は、ユーザーがブラウザ、Windows 設定画面、デスクトップアプリ、IDE、terminal を見ている時に、その場で:
+
+- これなに？
+- 次どうすればいい？
+- このボタン押していい？
+- この設定は何に効く？
+- このエラーはどう読めばいい？
+- この画面を Codex 作業に渡して
+
+と聞けること。
+
+Codex / repo 連携は重要だが、常に主役ではない。通常時は「画面を理解して、意味、判断材料、次の一手を説明する」ことが主 UX。開発作業に入った時だけ、同じ画面文脈を Codex / repo / test / PR work に橋渡しする。
+
+回答方針も `画面テキストの読み上げ` ではなく `画面の解釈 + ユーザーに関係する判断 + 次の一手` を標準にする。
+
 ## Why This Changed
 
 これまでの Phase 0-B は、実質この流れだった:

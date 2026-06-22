@@ -192,7 +192,7 @@ Desktop status / debug / fallback UI:
 | Windows Chrome -> WSL hybrid runtime | Done | native host config parser / WSL argv builder / daemon `--stdio-status` |
 | Final-A automated impact audit | Done for implemented code path | error sanitization tests, port-close tests, fallback tests, prior implementation verification |
 | Final-B automated refactor pass | Done for implemented code path | client core split, daemon protocol split, focused test/harness updates |
-| Windows Chrome / Edge manual smoke | Pending | requires Windows browser install state, Windows host exe, and user-level host manifest/config |
+| Windows Chrome / Edge manual smoke | Edge done / Chrome blocked in local smoke | Edge native Ask path passed on Windows -> WSL; local Google Chrome rejected command-line unpacked extension loading |
 | Release / distribution readiness | Pending | extension ID, installer, signing, release manifest, CD remain undecided |
 
 The previous implementation record treats the `bc024c9` code path and the immediately preceding `make ci-check` pass as the older automated baseline.
@@ -267,7 +267,19 @@ make desktop-dev
 
 ### A. Windows Chrome -> WSL Manual Smoke
 
-Manual smoke is still pending and must not be reported as complete until run against Windows Chrome / Edge.
+Manual smoke status:
+
+- Edge local smoke completed on 2026-06-22 against Windows Edge
+  `149.0.4022.80`, unpacked extension ID
+  `mgobgeddmofndkghhabpjfgmcbiaoohm`, Windows native host exe, WSL `Ubuntu`,
+  and Codex CLI `0.141.0`.
+- The Edge smoke verified Native Messaging `initialize`, `session/create`,
+  `context/attach_browser`, `message/send`, `turn/delta`, `turn/completed`,
+  and broken WSL config `setup_required`.
+- Local Google Chrome smoke is not complete. This machine's Google Chrome
+  rejected command-line unpacked loading with `--load-extension is not allowed
+  in Google Chrome, ignoring.` Chrome should be rechecked later through Chrome
+  for Testing, manual unpacked load, or store/distribution ID flow.
 
 Smoke path:
 
@@ -334,6 +346,22 @@ Release work remains undecided and should be handled as a separate tranche:
 - Decide CD owner and CI secrets boundary.
 - Add release smoke matrix for Chrome, Chrome for Testing, Chromium, Edge, Linux, macOS, Windows.
 - Decide support wording for host manifest mismatch and upgrade / uninstall.
+
+Before store publication or signing, do a smaller local alpha setup tranche.
+This is setup infrastructure for the assistant-first product direction, not the
+product center itself:
+
+- Add a one-command local installer / setup script for the developer machine.
+- Build/copy the Windows native host exe, WSL daemon, and extension artifacts.
+- Register the browser-specific Native Messaging manifest for the exact
+  extension ID.
+- Write `%APPDATA%\Screen Sidekick\native-host-config.json`.
+- Include a setup doctor that checks WSL, Codex CLI visibility from the native
+  host launch path, daemon status startup, manifest registration, and a protocol
+  smoke.
+- Include uninstall for the user-level registry/manifest/config entries.
+- Keep Store publication, code signing, and formal Windows installer work as
+  later distribution tasks.
 
 ### C. Desktop Tray / Status-only Direction
 
