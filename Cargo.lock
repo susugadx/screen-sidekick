@@ -907,6 +907,7 @@ dependencies = [
  "screen-sidekick-session",
  "screen-sidekick-sidekick-daemon",
  "screen-sidekick-sidekick-protocol",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

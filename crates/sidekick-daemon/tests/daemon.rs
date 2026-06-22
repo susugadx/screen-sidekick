@@ -24,12 +24,12 @@ use screen_sidekick_codex_client::{
 use screen_sidekick_session::{BeginTurn, CreateAttachment, SessionStore};
 use screen_sidekick_sidekick_daemon::{
     build_daemon_router, DaemonOptions, DaemonRuntime, DaemonState, MAX_ATTACHMENT_BYTES,
-    MAX_CAPTURE_BODY_BYTES,
+    MAX_CAPTURE_BODY_BYTES, SIDECAR_OWNED_WEBSOCKET_HEADER, SIDECAR_OWNED_WEBSOCKET_HEADER_VALUE,
 };
 use screen_sidekick_sidekick_protocol::{
     method, notification, AttachmentSourceType, ErrorCode, JsonRpcFailure, JsonRpcRequest,
     JsonRpcResponse, JsonRpcSuccess, MessageRole, MessageSendIdempotencyDisposition, ProtocolError,
-    SafetyStatus, SIDEKICK_PROTOCOL_VERSION,
+    SafetyStatus, TurnStatus, SIDEKICK_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -1223,6 +1223,154 @@ async fn websocket_rejects_second_session_message_while_daemon_turn_is_running()
 }
 
 #[tokio::test]
+async fn browser_websocket_disconnect_preserves_owned_active_turn_for_recovery() {
+    let (_runtime, status, store, _codex) = start_test_daemon_holding_turn();
+    let mut socket = connect_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+    let mut observer = connect_to_daemon(&status.ws_url).await;
+    let _ = send_request(
+        &mut observer,
+        "observer-init",
+        method::INITIALIZE,
+        initialize_params(&status.token),
+    )
+    .await;
+    let _ = send_request(
+        &mut observer,
+        "observer-subscribe",
+        method::SESSION_SUBSCRIBE,
+        json!({ "session_id": session_id.clone() }),
+    )
+    .await;
+
+    let send_result = send_request(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Keep running until disconnect",
+            "idempotency_key": "disconnect-running-turn",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    let turn_id = send_result["turn_id"]
+        .as_str()
+        .expect("turn id is returned")
+        .to_owned();
+    assert_eq!(send_result["reused"], json!(false));
+    while read_notification_with_timeout(&mut observer)
+        .await
+        .is_some()
+    {}
+
+    socket.close(None).await.expect("websocket closes");
+    drop(socket);
+    assert!(read_notification_with_timeout(&mut observer)
+        .await
+        .is_none());
+    let running_turn = store.get_turn(&turn_id).expect("turn loads");
+    let session_state = store.get_session(&session_id).expect("session loads");
+
+    assert_eq!(running_turn.status, TurnStatus::Running);
+    assert_eq!(
+        session_state.session.active_turn_id.as_deref(),
+        Some(turn_id.as_str())
+    );
+    assert!(session_state.active_turn.is_some());
+
+    let mut recovered_socket = connect_to_daemon(&status.ws_url).await;
+    let _ = send_request(
+        &mut recovered_socket,
+        "recovered-init",
+        method::INITIALIZE,
+        initialize_params(&status.token),
+    )
+    .await;
+    let recovered_session = send_request(
+        &mut recovered_socket,
+        "recovered-session",
+        method::SESSION_GET,
+        json!({ "session_id": session_id }),
+    )
+    .await;
+
+    assert_eq!(
+        recovered_session["session"]["active_turn_id"],
+        json!(turn_id.clone())
+    );
+    assert_eq!(recovered_session["active_turn"]["id"], json!(turn_id));
+    assert_eq!(recovered_session["active_turn"]["status"], json!("running"));
+}
+
+#[tokio::test]
+async fn sidecar_websocket_disconnect_fails_owned_active_turn_and_clears_session() {
+    let (_runtime, status, store, _codex) = start_test_daemon_holding_turn();
+    let mut socket = connect_sidecar_owned_to_daemon(&status.ws_url).await;
+    let session_id = initialized_session(&mut socket, &status.token).await;
+    let mut observer = connect_to_daemon(&status.ws_url).await;
+    let _ = send_request(
+        &mut observer,
+        "observer-init",
+        method::INITIALIZE,
+        initialize_params(&status.token),
+    )
+    .await;
+    let _ = send_request(
+        &mut observer,
+        "observer-subscribe",
+        method::SESSION_SUBSCRIBE,
+        json!({ "session_id": session_id.clone() }),
+    )
+    .await;
+
+    let send_result = send_request(
+        &mut socket,
+        "send",
+        method::MESSAGE_SEND,
+        json!({
+            "session_id": session_id.clone(),
+            "text": "Keep running until sidecar disconnect",
+            "idempotency_key": "sidecar-disconnect-running-turn",
+            "attachment_ids": [],
+            "mode": "ask_only"
+        }),
+    )
+    .await;
+    let turn_id = send_result["turn_id"]
+        .as_str()
+        .expect("turn id is returned")
+        .to_owned();
+    assert_eq!(send_result["reused"], json!(false));
+
+    socket.close(None).await.expect("websocket closes");
+    drop(socket);
+    let notifications = read_notifications_until(&mut observer, notification::TURN_FAILED).await;
+    let failed_notification = notifications
+        .iter()
+        .find(|value| {
+            value.get("method").and_then(Value::as_str) == Some(notification::TURN_FAILED)
+        })
+        .expect("turn failed notification is observed");
+    wait_for_session_without_active_turn(&store, &session_id).await;
+    let failed_turn = store.get_turn(&turn_id).expect("turn loads");
+    let session_state = store.get_session(&session_id).expect("session loads");
+
+    assert_eq!(
+        failed_notification["params"]["message"],
+        json!("Sidecar WebSocket connection closed before the turn completed.")
+    );
+    assert_eq!(failed_turn.status, TurnStatus::Failed);
+    assert_eq!(
+        failed_turn.error.as_ref().map(|error| &error.code),
+        Some(&ErrorCode::CodexAppServerUnavailable)
+    );
+    assert!(session_state.active_turn.is_none());
+}
+
+#[tokio::test]
 async fn daemon_startup_recovers_persisted_active_turn_before_message_send() {
     let store = SessionStore::in_memory().expect("in-memory store opens");
     let stale_session = store
@@ -1893,12 +2041,35 @@ fn test_state(events: Vec<CodexEvent>) -> DaemonState {
 }
 
 async fn connect_to_daemon(ws_url: &str) -> TestSocket {
+    connect_to_daemon_with_ownership(ws_url, TestWebSocketOwnership::Browser).await
+}
+
+async fn connect_sidecar_owned_to_daemon(ws_url: &str) -> TestSocket {
+    connect_to_daemon_with_ownership(ws_url, TestWebSocketOwnership::SidecarOwned).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestWebSocketOwnership {
+    Browser,
+    SidecarOwned,
+}
+
+async fn connect_to_daemon_with_ownership(
+    ws_url: &str,
+    ownership: TestWebSocketOwnership,
+) -> TestSocket {
     let mut request = ws_url
         .into_client_request()
         .expect("websocket request is valid");
     request
         .headers_mut()
         .insert("Origin", WsHeaderValue::from_static(EXTENSION_ORIGIN));
+    if ownership == TestWebSocketOwnership::SidecarOwned {
+        request.headers_mut().insert(
+            SIDECAR_OWNED_WEBSOCKET_HEADER,
+            WsHeaderValue::from_static(SIDECAR_OWNED_WEBSOCKET_HEADER_VALUE),
+        );
+    }
     let (socket, _) = connect_async(request).await.expect("websocket connects");
     socket
 }

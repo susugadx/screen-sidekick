@@ -77,6 +77,28 @@ test("uses native messaging for ask when only fallback pairing token is filled",
   assert.equal(server.messageSendRequests[0]?.text, "Native question with token only");
 });
 
+test("native setup-required error does not fall back to saved websocket settings", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    setupRequiredInitialize: true,
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Needs native setup");
+  await waitFor(
+    () =>
+      element("status").textContent ===
+      "Screen Sidekick Windows native host setup is required.",
+  );
+
+  assert.equal(server.sockets.length, 1);
+  assert.equal(server.socket.url, undefined);
+  assert.equal(server.sessionCreateCount, 0);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+  assert.equal(element("message-input").value, "Needs native setup");
+});
+
 test("keeps ask controls disabled after message send response until turn completes", async () => {
   const server = installSidePanelHarness();
   await importFreshSidePanel();

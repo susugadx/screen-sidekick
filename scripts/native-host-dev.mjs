@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const HOST_NAME = "com.screen_sidekick.host";
 const DESCRIPTION = "Screen Sidekick Native Messaging Host";
+const CONFIG_SCHEMA_VERSION = "screen_sidekick_native_host_config.v0.1";
+const CONFIG_ENV = "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG";
 const BROWSERS = new Set(["chrome", "chrome-for-testing", "chromium", "edge"]);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -33,25 +35,38 @@ function main(argv) {
 
 function generate(options) {
   const extensionId = requireExtensionId(options);
-  const hostPath = requireHostPath(options);
+  const targetPlatform = targetPlatformForOptions(options);
+  const wslConfig = buildWslConfig(options);
+  ensureTargetCanBeWritten(targetPlatform, options.dryRun);
+  const hostPath = requireHostPath(options, targetPlatform, Boolean(wslConfig));
   const manifestPath = options.out
     ? resolve(options.out)
     : defaultGeneratedManifestPath();
   const manifest = buildManifest(hostPath, extensionId);
   writeJsonFile(manifestPath, manifest, options.dryRun);
+  if (wslConfig) {
+    writeJsonFile(nativeHostConfigPath(targetPlatform, options.dryRun), wslConfig, options.dryRun);
+  }
 }
 
 function install(options) {
   const browser = requireBrowser(options);
   const extensionId = requireExtensionId(options);
-  const hostPath = requireHostPath(options);
+  const targetPlatform = targetPlatformForOptions(options);
+  const wslConfig = buildWslConfig(options);
+  ensureTargetCanBeWritten(targetPlatform, options.dryRun);
+  requireWindowsInstallRuntimeConfig(targetPlatform, wslConfig);
+  const hostPath = requireHostPath(options, targetPlatform, Boolean(wslConfig));
   const manifestPath = options.manifestPath
     ? resolve(options.manifestPath)
     : defaultGeneratedManifestPath();
   const manifest = buildManifest(hostPath, extensionId);
   writeJsonFile(manifestPath, manifest, options.dryRun);
+  if (wslConfig) {
+    writeJsonFile(nativeHostConfigPath(targetPlatform, options.dryRun), wslConfig, options.dryRun);
+  }
 
-  if (platform() === "win32") {
+  if (targetPlatform === "win32") {
     const key = windowsRegistryKey(browser);
     runOrPrint(
       ["reg", "add", key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f"],
@@ -90,6 +105,26 @@ function buildManifest(hostPath, extensionId) {
   };
 }
 
+function buildWslConfig(options) {
+  const hasAny = Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary);
+  if (!hasAny) {
+    return null;
+  }
+  const distro = requireOption(options.wslDistro, "--wsl-distro");
+  const workdir = requireOption(options.wslWorkdir, "--wsl-workdir");
+  const daemonBinary = requireOption(options.wslDaemonBinary, "--wsl-daemon-binary");
+  validateWslDistro(distro);
+  validateLinuxPath(workdir, "--wsl-workdir", true);
+  validateLinuxPath(daemonBinary, "--wsl-daemon-binary", false);
+  return {
+    schema_version: CONFIG_SCHEMA_VERSION,
+    mode: "wsl_auto",
+    wsl_distro: distro,
+    wsl_workdir: workdir,
+    wsl_daemon_binary: daemonBinary,
+  };
+}
+
 function writeJsonFile(filePath, value, dryRun) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
   if (dryRun) {
@@ -118,19 +153,24 @@ function requireExtensionId(options) {
   return extensionId;
 }
 
-function requireHostPath(options) {
-  const hostPath = options.hostPath ? resolve(options.hostPath) : defaultHostBinaryPath();
-  if (!isAbsolute(hostPath)) {
+function requireHostPath(options, targetPlatform, requireExplicit) {
+  if (requireExplicit && !options.hostPath) {
+    usage("--host-path is required when generating WSL auto-start config");
+  }
+  const hostPath = options.hostPath
+    ? normalizeHostPath(options.hostPath, targetPlatform)
+    : defaultHostBinaryPath(targetPlatform);
+  if (!isAbsoluteForTarget(hostPath, targetPlatform)) {
     usage("--host-path must resolve to an absolute path");
   }
-  if (!options.dryRun && !existsSync(hostPath)) {
+  if (!options.dryRun && platform() === targetPlatform && !existsSync(hostPath)) {
     usage(`host binary does not exist: ${hostPath}`);
   }
   return hostPath;
 }
 
-function defaultHostBinaryPath() {
-  const suffix = platform() === "win32" ? ".exe" : "";
+function defaultHostBinaryPath(targetPlatform) {
+  const suffix = targetPlatform === "win32" ? ".exe" : "";
   return join(repoRoot, "target", "debug", `screen-sidekick-native-host${suffix}`);
 }
 
@@ -159,6 +199,72 @@ function userManifestPath(browser) {
     return join(home, ...dirs[browser], "NativeMessagingHosts", `${HOST_NAME}.json`);
   }
   return defaultGeneratedManifestPath();
+}
+
+function targetPlatformForOptions(options) {
+  return hasWslConfigOptions(options) || isWindowsAbsolutePath(options.hostPath ?? "")
+    ? "win32"
+    : platform();
+}
+
+function hasWslConfigOptions(options) {
+  return Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary);
+}
+
+function ensureTargetCanBeWritten(targetPlatform, dryRun) {
+  if (targetPlatform === "win32" && platform() !== "win32" && !dryRun) {
+    usage("Windows native host setup must run on Windows; use --dry-run to preview it elsewhere");
+  }
+}
+
+function requireWindowsInstallRuntimeConfig(targetPlatform, wslConfig) {
+  if (targetPlatform === "win32" && !wslConfig) {
+    usage(
+      "Windows native host install requires --wsl-distro, --wsl-workdir, and --wsl-daemon-binary",
+    );
+  }
+}
+
+function normalizeHostPath(rawPath, targetPlatform) {
+  if (targetPlatform === "win32") {
+    if (isWindowsAbsolutePath(rawPath)) {
+      return rawPath;
+    }
+    if (platform() === "win32") {
+      return resolve(rawPath);
+    }
+    usage("--host-path must be an absolute Windows path for WSL auto-start setup");
+  }
+  return resolve(rawPath);
+}
+
+function isAbsoluteForTarget(filePath, targetPlatform) {
+  if (targetPlatform === "win32") {
+    return isWindowsAbsolutePath(filePath);
+  }
+  return isAbsolute(filePath);
+}
+
+function isWindowsAbsolutePath(filePath) {
+  return /^[A-Za-z]:[\\/]/.test(filePath) || /^\\\\/.test(filePath);
+}
+
+function nativeHostConfigPath(targetPlatform, dryRun) {
+  if (process.env[CONFIG_ENV]) {
+    return process.env[CONFIG_ENV];
+  }
+  if (targetPlatform !== "win32") {
+    usage("native host config is only defined for Windows WSL auto-start setup");
+  }
+  const appData = process.env.APPDATA;
+  if (!appData && !dryRun) {
+    usage("APPDATA is required to write the Windows native host config");
+  }
+  return joinWindowsPath(appData ?? "%APPDATA%", "Screen Sidekick", "native-host-config.json");
+}
+
+function joinWindowsPath(...parts) {
+  return parts.join("\\");
 }
 
 function windowsRegistryKey(browser) {
@@ -211,6 +317,15 @@ function parseArgs(args) {
       case "--manifest-path":
         options.manifestPath = takeValue(args, ++index, arg);
         break;
+      case "--wsl-distro":
+        options.wslDistro = takeValue(args, ++index, arg);
+        break;
+      case "--wsl-workdir":
+        options.wslWorkdir = takeValue(args, ++index, arg);
+        break;
+      case "--wsl-daemon-binary":
+        options.wslDaemonBinary = takeValue(args, ++index, arg);
+        break;
       case "--out":
         options.out = takeValue(args, ++index, arg);
         break;
@@ -224,6 +339,13 @@ function parseArgs(args) {
   return options;
 }
 
+function requireOption(value, option) {
+  if (!value) {
+    usage(`missing value for ${option}`);
+  }
+  return value;
+}
+
 function takeValue(args, index, option) {
   const value = args[index];
   if (!value || value.startsWith("--")) {
@@ -232,13 +354,37 @@ function takeValue(args, index, option) {
   return value;
 }
 
+function validateWslDistro(value) {
+  if (
+    value.trim() !== value ||
+    value.length === 0 ||
+    value.length > 128 ||
+    /[/"'\\\x00-\x1f\x7f]/.test(value)
+  ) {
+    usage("--wsl-distro is invalid");
+  }
+}
+
+function validateLinuxPath(value, option, allowRoot) {
+  if (
+    value.trim() !== value ||
+    !value.startsWith("/") ||
+    (!allowRoot && value === "/") ||
+    value.includes("\\") ||
+    /[\x00-\x1f\x7f]/.test(value) ||
+    value.split("/").includes("..")
+  ) {
+    usage(`${option} must be an absolute Linux path without parent traversal`);
+  }
+}
+
 function usage(error) {
   if (error) {
     console.error(error);
   }
   console.error(`Usage:
-  node scripts/native-host-dev.mjs generate --extension-id <32-char-id> [--host-path <path>] [--out <path>] [--dry-run]
-  node scripts/native-host-dev.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> [--host-path <path>] [--dry-run]
+  node scripts/native-host-dev.mjs generate --extension-id <32-char-id> [--host-path <path>] [--out <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
+  node scripts/native-host-dev.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> [--host-path <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
   node scripts/native-host-dev.mjs uninstall --browser <chrome|chrome-for-testing|chromium|edge> [--dry-run]
   node scripts/native-host-dev.mjs locations`);
   process.exit(2);

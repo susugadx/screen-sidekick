@@ -18,12 +18,37 @@ pub enum ProtocolConnectionAuth {
     NativeHost { origin: Option<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisconnectCleanup {
+    NativeHost,
+    SidecarWebSocket,
+}
+
+impl DisconnectCleanup {
+    fn failure_reason(self) -> &'static str {
+        match self {
+            Self::NativeHost => "native_host_port_closed",
+            Self::SidecarWebSocket => "sidecar_websocket_connection_closed",
+        }
+    }
+
+    fn failure_message(self) -> &'static str {
+        match self {
+            Self::NativeHost => "Native host connection closed before the turn completed.",
+            Self::SidecarWebSocket => {
+                "Sidecar WebSocket connection closed before the turn completed."
+            }
+        }
+    }
+}
+
 pub struct ProtocolConnection {
     state: DaemonState,
     subscribed_sessions: HashSet<String>,
     owned_active_turns: HashSet<String>,
     initialized: bool,
     auth: ProtocolConnectionAuth,
+    disconnect_cleanup: Option<DisconnectCleanup>,
 }
 
 impl ProtocolConnection {
@@ -33,18 +58,40 @@ impl ProtocolConnection {
     }
 
     #[must_use]
+    pub fn sidecar_websocket(state: DaemonState) -> Self {
+        Self::new_with_disconnect_cleanup(
+            state,
+            ProtocolConnectionAuth::PairingToken,
+            Some(DisconnectCleanup::SidecarWebSocket),
+        )
+    }
+
+    #[must_use]
     pub fn native_host(state: DaemonState, origin: Option<String>) -> Self {
         Self::new(state, ProtocolConnectionAuth::NativeHost { origin })
     }
 
     #[must_use]
     pub fn new(state: DaemonState, auth: ProtocolConnectionAuth) -> Self {
+        let disconnect_cleanup = match &auth {
+            ProtocolConnectionAuth::PairingToken => None,
+            ProtocolConnectionAuth::NativeHost { .. } => Some(DisconnectCleanup::NativeHost),
+        };
+        Self::new_with_disconnect_cleanup(state, auth, disconnect_cleanup)
+    }
+
+    fn new_with_disconnect_cleanup(
+        state: DaemonState,
+        auth: ProtocolConnectionAuth,
+        disconnect_cleanup: Option<DisconnectCleanup>,
+    ) -> Self {
         Self {
             state,
             subscribed_sessions: HashSet::new(),
             owned_active_turns: HashSet::new(),
             initialized: false,
             auth,
+            disconnect_cleanup,
         }
     }
 
@@ -78,13 +125,16 @@ impl ProtocolConnection {
     }
 
     pub fn fail_owned_active_turns_on_disconnect(&mut self) -> Result<usize, SessionStoreError> {
+        let Some(disconnect) = self.disconnect_cleanup else {
+            return Ok(0);
+        };
         let turn_ids = self.owned_active_turns.drain().collect::<Vec<_>>();
         let mut failed_count = 0_usize;
         for turn_id in turn_ids {
             match self.state.store.fail_turn(
                 &turn_id,
                 ErrorCode::CodexAppServerUnavailable,
-                Some("native_host_port_closed"),
+                Some(disconnect.failure_reason()),
             ) {
                 Ok(turn) => {
                     failed_count += 1;
@@ -93,10 +143,7 @@ impl ProtocolConnection {
                         json!(TurnFailedNotification {
                             session_id: turn.session_id.clone(),
                             turn,
-                            message: Some(
-                                "Native host connection closed before the turn completed."
-                                    .to_owned()
-                            ),
+                            message: Some(disconnect.failure_message().to_owned()),
                         }),
                     ));
                 }

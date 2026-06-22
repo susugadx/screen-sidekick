@@ -37,6 +37,7 @@ export class FakeSidekickServer {
       message_send_idempotency_disposition: "discard",
     },
     failMissingSessionSubscribe = false,
+    setupRequiredInitialize = false,
   } = {}) {
     this.attachmentSafetyStatus = attachmentSafetyStatus;
     this.closeBeforePersistSendNumbers = closeBeforePersistSendNumbers;
@@ -57,6 +58,7 @@ export class FakeSidekickServer {
     this.terminalReusedSendNumbers = terminalReusedSendNumbers;
     this.terminalReusedSendErrorData = terminalReusedSendErrorData;
     this.failMissingSessionSubscribe = failMissingSessionSubscribe;
+    this.setupRequiredInitialize = setupRequiredInitialize;
     this.deferredCloseEvents = [];
     this.deferredSessionGetResponses = [];
     this.deferredSendResponses = [];
@@ -77,6 +79,15 @@ export class FakeSidekickServer {
   handle(socket, request) {
     switch (request.method) {
       case "initialize":
+        if (this.setupRequiredInitialize) {
+          socket.receiveFailure(
+            request.id,
+            "setup_required",
+            "Screen Sidekick Windows native host setup is required.",
+            { retryable: false },
+          );
+          return;
+        }
         socket.receiveSuccess(request.id, {
           codex_readiness: this.codexReadiness,
           limits: readyProtocolLimits(),

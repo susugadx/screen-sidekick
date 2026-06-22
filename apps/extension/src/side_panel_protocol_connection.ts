@@ -1,6 +1,7 @@
 import {
   NATIVE_CONNECTION_SETTINGS,
   NativeMessagingSidekickClient,
+  SidekickProtocolError,
   WebSocketSidekickClient,
   isNativeConnectionSettings,
   type DaemonSettings,
@@ -36,7 +37,7 @@ export class SidePanelProtocolConnection {
     try {
       return await this.ensure(NATIVE_CONNECTION_SETTINGS, onNotification);
     } catch (nativeError) {
-      if (!fallbackSettings) {
+      if (!fallbackSettings || isSetupRequiredProtocolError(nativeError)) {
         throw nativeError;
       }
       return this.ensure(fallbackSettings, onNotification);
@@ -85,4 +86,8 @@ export class SidePanelProtocolConnection {
     this.settings = null;
     client?.close();
   }
+}
+
+function isSetupRequiredProtocolError(error: unknown): boolean {
+  return error instanceof SidekickProtocolError && error.code === "setup_required";
 }

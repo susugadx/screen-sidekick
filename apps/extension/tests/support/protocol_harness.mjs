@@ -76,6 +76,23 @@ export class RejectingInitializeServer {
   }
 }
 
+export class SetupRequiredInitializeServer {
+  socket = null;
+
+  handle(socket, request) {
+    if (request.method === "initialize") {
+      socket.receiveFailure(
+        request.id,
+        "setup_required",
+        "Screen Sidekick Windows native host setup is required.",
+        { retryable: false },
+      );
+      return;
+    }
+    socket.receiveFailure(request.id, "method_not_found", "Method was not found.");
+  }
+}
+
 export class UnavailableInitializeServer {
   socket = null;
 

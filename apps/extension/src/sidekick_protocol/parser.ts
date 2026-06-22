@@ -430,6 +430,7 @@ function parseErrorCode(value: unknown): ErrorCode | null {
     case "unauthorized":
     case "forbidden_origin":
     case "unsupported_protocol_version":
+    case "setup_required":
     case "invalid_request":
     case "invalid_params":
     case "method_not_found":

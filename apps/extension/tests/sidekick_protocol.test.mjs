@@ -24,6 +24,7 @@ import {
   ProtocolFakeWebSocket,
   RejectingInitializeServer,
   SmallMessageLimitServer,
+  SetupRequiredInitializeServer,
   UnansweredInitializeServer,
   UnavailableInitializeServer,
   connectProtocolClient,
@@ -74,6 +75,26 @@ test("parses JSON-RPC protocol errors with stable codes", () => {
   assert.equal(message.error.code, "unauthorized");
   assert.equal(message.error.retryable, false);
   assert.equal(message.error.messageSendIdempotencyDisposition, undefined);
+});
+
+test("parses setup-required protocol errors", () => {
+  const message = parseWireMessageText(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: "request-setup",
+      error: {
+        code: "setup_required",
+        message: "Screen Sidekick Windows native host setup is required.",
+        data: { retryable: false },
+      },
+    }),
+  );
+
+  assert.equal(message.kind, "failure");
+  assert.equal(message.id, "request-setup");
+  assert.equal(message.error.code, "setup_required");
+  assert.equal(message.error.message, "Screen Sidekick Windows native host setup is required.");
+  assert.equal(message.error.retryable, false);
 });
 
 test("parses structured message send idempotency disposition", () => {
@@ -320,6 +341,31 @@ test("native messaging connect maps unavailable host to setup error", async () =
       () => NativeMessagingSidekickClient.connect("test"),
       /Screen Sidekick native host is not installed/,
     );
+  } finally {
+    restoreNativeMessaging();
+  }
+});
+
+test("native messaging connect surfaces setup-required initialize failure", async () => {
+  const server = new SetupRequiredInitializeServer();
+  const restoreNativeMessaging = installProtocolNativeMessaging(server);
+
+  try {
+    await assert.rejects(
+      () => NativeMessagingSidekickClient.connect("test"),
+      (error) => {
+        assert.equal(error.name, "SidekickProtocolError");
+        assert.equal(error.code, "setup_required");
+        assert.equal(
+          error.message,
+          "Screen Sidekick Windows native host setup is required.",
+        );
+        assert.equal(error.retryable, false);
+        return true;
+      },
+    );
+    assert.equal(server.socket.sent[0]?.method, "initialize");
+    assert.equal(server.socket.disconnected, true);
   } finally {
     restoreNativeMessaging();
   }

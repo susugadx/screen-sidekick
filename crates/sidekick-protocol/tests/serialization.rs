@@ -67,6 +67,34 @@ fn error_response_uses_stable_error_code() {
 }
 
 #[test]
+fn setup_required_error_response_serializes_actionable_data() {
+    let response = JsonRpcFailure::new(
+        "req_1",
+        ProtocolError::new(
+            ErrorCode::SetupRequired,
+            "Screen Sidekick Windows native host setup is required.",
+        )
+        .with_data(ErrorData {
+            retryable: Some(false),
+            user_action: Some(
+                "Install the Windows WSL native-host config or set the sidecar env variables."
+                    .to_owned(),
+            ),
+            ..ErrorData::default()
+        }),
+    );
+
+    let value = serde_json::to_value(response).expect("response serializes");
+
+    assert_eq!(value["error"]["code"], json!("setup_required"));
+    assert_eq!(value["error"]["data"]["retryable"], json!(false));
+    assert_eq!(
+        value["error"]["data"]["user_action"],
+        json!("Install the Windows WSL native-host config or set the sidecar env variables.")
+    );
+}
+
+#[test]
 fn error_response_serializes_message_send_idempotency_disposition() {
     let response = JsonRpcFailure::new(
         "req_1",

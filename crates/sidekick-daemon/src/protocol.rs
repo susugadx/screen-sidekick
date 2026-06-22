@@ -16,10 +16,23 @@ mod handlers;
 
 pub use connection::{ProtocolConnection, ProtocolConnectionAuth};
 
-pub(crate) async fn websocket_loop(socket: WebSocket, state: DaemonState) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketConnectionKind {
+    Browser,
+    SidecarOwned,
+}
+
+pub(crate) async fn websocket_loop(
+    socket: WebSocket,
+    state: DaemonState,
+    connection_kind: WebSocketConnectionKind,
+) {
     let (mut sender, mut receiver) = socket.split();
     let websocket_shutdown = state.websocket_shutdown.clone();
-    let mut connection = ProtocolConnection::websocket(state);
+    let mut connection = match connection_kind {
+        WebSocketConnectionKind::Browser => ProtocolConnection::websocket(state),
+        WebSocketConnectionKind::SidecarOwned => ProtocolConnection::sidecar_websocket(state),
+    };
     let mut events = connection.event_receiver();
     let mut shutdown = websocket_shutdown.subscribe();
 
@@ -61,6 +74,10 @@ pub(crate) async fn websocket_loop(socket: WebSocket, state: DaemonState) {
             }
             _ = shutdown.recv() => break,
         }
+    }
+
+    if let Err(error) = connection.fail_owned_active_turns_on_disconnect() {
+        eprintln!("Screen Sidekick daemon failed to clean up disconnected turns: {error}");
     }
 }
 
