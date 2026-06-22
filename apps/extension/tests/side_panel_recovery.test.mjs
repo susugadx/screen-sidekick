@@ -7,6 +7,7 @@ import {
   activeChatMarkerFor,
   activeChatStorage,
   assertDifferentMessageSendRequest,
+  assertQuickQuestionsDisabled,
   assertSameMessageSendRequest,
   completedActiveChatSessions,
   currentActiveChatMarker,
@@ -751,6 +752,7 @@ test("stored active chat session get timeout releases recovery controls", async 
 
     assert.equal(element("ask").disabled, true);
     assert.equal(element("message-input").disabled, true);
+    assertQuickQuestionsDisabled(true);
     assert.equal(element("status").textContent, "Reconnecting to daemon");
     assert.equal(timers.size, 1);
 
@@ -758,6 +760,7 @@ test("stored active chat session get timeout releases recovery controls", async 
     await waitForMicrotasks(() => element("ask").disabled === false);
 
     assert.equal(element("message-input").disabled, false);
+    assertQuickQuestionsDisabled(false);
     assert.equal(element("status").textContent, "Daemon request timed out");
 
     server.releaseDeferredSessionGetResponses();

@@ -9,6 +9,7 @@ export interface SidePanelElements {
   messageForm: HTMLFormElement;
   messageInput: HTMLTextAreaElement;
   ask: HTMLButtonElement;
+  quickQuestions: HTMLButtonElement[];
   transcript: HTMLDivElement;
   debugCapture: HTMLButtonElement;
   copyJson: HTMLButtonElement;
@@ -34,6 +35,11 @@ export function loadSidePanelElements(): SidePanelElements {
     messageForm: requireElement("message-form", HTMLFormElement),
     messageInput: requireElement("message-input", HTMLTextAreaElement),
     ask: requireElement("ask", HTMLButtonElement),
+    quickQuestions: [
+      requireElement("quick-question-what", HTMLButtonElement),
+      requireElement("quick-question-next", HTMLButtonElement),
+      requireElement("quick-question-safe", HTMLButtonElement),
+    ],
     transcript: requireElement("transcript", HTMLDivElement),
     debugCapture: requireElement("debug-capture", HTMLButtonElement),
     copyJson: requireElement("copy-json", HTMLButtonElement),
@@ -72,10 +78,13 @@ export function updateControlsDisabled(
   elements: SidePanelElements,
   state: SidePanelControlState,
 ): void {
-  elements.ask.disabled =
+  const askDisabled =
     state.requestInFlight || state.turnActive || state.sessionRecoveryRequired;
-  elements.messageInput.disabled =
-    state.requestInFlight || state.turnActive || state.sessionRecoveryRequired;
+  elements.ask.disabled = askDisabled;
+  elements.messageInput.disabled = askDisabled;
+  for (const quickQuestion of elements.quickQuestions) {
+    quickQuestion.disabled = askDisabled;
+  }
   elements.debugCapture.disabled = state.requestInFlight;
   elements.saveBridge.disabled = state.requestInFlight;
 }

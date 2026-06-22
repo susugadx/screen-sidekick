@@ -86,6 +86,16 @@ async function initialize(): Promise<void> {
     event.preventDefault();
     void askCodex();
   });
+  for (const quickQuestion of elements.quickQuestions) {
+    quickQuestion.addEventListener("click", () => {
+      const question = quickQuestion.textContent?.trim();
+      if (!question) {
+        return;
+      }
+      elements.messageInput.value = question;
+      elements.messageInput.focus();
+    });
+  }
   elements.debugCapture.addEventListener("click", () => {
     void captureDebugToBridge();
   });

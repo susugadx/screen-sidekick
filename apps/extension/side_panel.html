@@ -26,6 +26,13 @@
       <section class="chat">
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <form id="message-form" class="message-form">
+          <div class="quick-questions" aria-label="Quick questions">
+            <button id="quick-question-what" type="button">これなに？</button>
+            <button id="quick-question-next" type="button">
+              次どうする？
+            </button>
+            <button id="quick-question-safe" type="button">押していい？</button>
+          </div>
           <textarea id="message-input" rows="3" spellcheck="true"></textarea>
           <button id="ask" type="submit">Ask Codex</button>
         </form>
