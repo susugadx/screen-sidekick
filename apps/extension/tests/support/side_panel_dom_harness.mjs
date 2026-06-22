@@ -38,6 +38,20 @@ export function messageRows() {
   return [...document.querySelectorAll(".message")];
 }
 
+export function quickQuestionButtons() {
+  return [
+    element("quick-question-what"),
+    element("quick-question-next"),
+    element("quick-question-safe"),
+  ];
+}
+
+export function assertQuickQuestionsDisabled(disabled) {
+  for (const button of quickQuestionButtons()) {
+    assert.equal(button.disabled, disabled);
+  }
+}
+
 export function transcriptText() {
   return element("transcript").textContent ?? "";
 }
@@ -76,6 +90,11 @@ export function installDom() {
         <button id="save-bridge" type="submit"></button>
       </form>
       <form id="message-form">
+        <div class="quick-questions">
+          <button id="quick-question-what" type="button">これなに？</button>
+          <button id="quick-question-next" type="button">次どうする？</button>
+          <button id="quick-question-safe" type="button">押していい？</button>
+        </div>
         <textarea id="message-input"></textarea>
         <button id="ask" type="submit"></button>
       </form>

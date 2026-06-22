@@ -118,6 +118,7 @@ export type ErrorCode =
   | "unauthorized"
   | "forbidden_origin"
   | "unsupported_protocol_version"
+  | "setup_required"
   | "invalid_request"
   | "invalid_params"
   | "method_not_found"

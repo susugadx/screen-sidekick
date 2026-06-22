@@ -898,6 +898,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "screen-sidekick-native-host"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "screen-sidekick-codex-client",
+ "screen-sidekick-session",
+ "screen-sidekick-sidekick-daemon",
+ "screen-sidekick-sidekick-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
 name = "screen-sidekick-prompt"
 version = "0.0.0"
 dependencies = [

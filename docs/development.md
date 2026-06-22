@@ -64,6 +64,14 @@ make desktop-check
 make desktop-ui-check
 ```
 
+Native Messaging host focused checks:
+
+```sh
+cargo test -p screen-sidekick-native-host
+cargo build -p screen-sidekick-native-host
+node scripts/native-host-dev.mjs install --browser chrome --extension-id <32-character-extension-id> --dry-run
+```
+
 The desktop bridge handler tests avoid Tauri system webview dependencies:
 
 ```sh
@@ -97,6 +105,11 @@ The `check` job runs `make ci-check`, which includes the local quick gate plus
 the desktop Tauri check and the desktop UI wasm check. The `whitespace` job runs
 `git diff --check` against the pull request or push diff.
 
+The default CI path does not require an installed Chrome/Edge native host,
+launching Chrome, or a logged-in Codex CLI. Native Messaging and Codex app-server
+behavior is covered by fake-port, framing, daemon protocol, and fake Codex
+tests. Manual browser smoke is still required before release packaging.
+
 Codex app-server schema drift is intentionally separate from the required PR
 gate. Use the manual `Codex Schema` workflow, or run the explicit developer
 command locally:
@@ -104,3 +117,94 @@ command locally:
 ```sh
 make codex-schema-check
 ```
+
+## Native Messaging Development
+
+Build the host:
+
+```sh
+cargo build -p screen-sidekick-native-host
+```
+
+Load `apps/extension` as an unpacked extension after running
+`npm --prefix apps/extension run build`, then copy the unpacked extension ID
+from the browser extension page.
+
+Install a user-level host manifest for that exact ID:
+
+```sh
+node scripts/native-host-dev.mjs install \
+  --browser chrome \
+  --extension-id <32-character-extension-id>
+```
+
+The helper supports `chrome`, `chrome-for-testing`, `chromium`, and `edge`.
+It writes user-level locations only. On Windows it writes an HKCU registry entry
+with `reg.exe`; on Linux and macOS it writes the browser-specific
+`NativeMessagingHosts/com.screen_sidekick.host.json` file. Windows install
+requires the WSL auto-start options shown below so the registered host can start
+the runtime it needs.
+
+The generated manifest contains one explicit allowed origin:
+
+```json
+{
+  "name": "com.screen_sidekick.host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://<extension-id>/"]
+}
+```
+
+Wildcards are not valid. If the unpacked extension ID changes, regenerate the
+manifest. A future store/release extension ID will need its own explicit entry.
+
+### Windows Chrome with WSL Sidekick
+
+Windows Chrome can use a Windows native host executable that starts the Sidekick
+daemon inside WSL. Build or provide the Windows host exe separately, and build
+the WSL daemon binary from this repo:
+
+```sh
+cargo build -p screen-sidekick-sidekick-daemon --bin screen-sidekick-daemon
+```
+
+Generate the Windows manifest registration and WSL auto-start config:
+
+```sh
+node scripts/native-host-dev.mjs install \
+  --browser chrome \
+  --extension-id <32-character-extension-id> \
+  --host-path 'C:\path\to\screen-sidekick-native-host.exe' \
+  --wsl-distro Ubuntu-24.04 \
+  --wsl-workdir /home/<user>/dev/projects/screen-sidekick \
+  --wsl-daemon-binary /home/<user>/dev/projects/screen-sidekick/target/debug/screen-sidekick-daemon
+```
+
+The config path defaults to
+`%APPDATA%\Screen Sidekick\native-host-config.json`; override it with
+`SCREEN_SIDEKICK_NATIVE_HOST_CONFIG` if needed. The native host validates the
+config and starts WSL with argv, not a shell command string. If the sidecar env
+vars below are not set and the Windows config is missing or invalid, WSL
+startup/status reporting fails, or the host cannot connect to the reported WSL
+daemon WebSocket before the first daemon response, the host answers the first
+Native Messaging request with a structured setup-required error instead of
+falling back to an in-process Windows runtime or silent WebSocket fallback.
+Each WSL auto-start daemon is tied to the native port that launched it, so it
+does not run global interrupted-turn recovery on startup. A turn started by that
+sidecar-owned WebSocket relay is still failed and cleared if that relay closes
+before a terminal turn notification. Browser direct/fallback WebSocket reloads
+do not use this sidecar marker; they preserve the running active turn for
+reconnect and `session/get` recovery.
+
+For loopback sidecar debugging, set both variables before launching the host:
+
+```sh
+SCREEN_SIDEKICK_DAEMON_WS_URL=ws://127.0.0.1:<port>/v0/ws \
+SCREEN_SIDEKICK_DAEMON_TOKEN=<pairing-token> \
+target/debug/screen-sidekick-native-host
+```
+
+If both variables are present, this explicit sidecar connection has priority on
+all platforms. If either variable is missing, Linux and macOS hosts start the
+in-process Sidekick runtime. Windows hosts use WSL auto-start config instead.
+The host does not scan ports or read token files.

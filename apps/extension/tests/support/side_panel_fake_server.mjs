@@ -37,6 +37,7 @@ export class FakeSidekickServer {
       message_send_idempotency_disposition: "discard",
     },
     failMissingSessionSubscribe = false,
+    setupRequiredInitialize = false,
   } = {}) {
     this.attachmentSafetyStatus = attachmentSafetyStatus;
     this.closeBeforePersistSendNumbers = closeBeforePersistSendNumbers;
@@ -57,6 +58,7 @@ export class FakeSidekickServer {
     this.terminalReusedSendNumbers = terminalReusedSendNumbers;
     this.terminalReusedSendErrorData = terminalReusedSendErrorData;
     this.failMissingSessionSubscribe = failMissingSessionSubscribe;
+    this.setupRequiredInitialize = setupRequiredInitialize;
     this.deferredCloseEvents = [];
     this.deferredSessionGetResponses = [];
     this.deferredSendResponses = [];
@@ -77,6 +79,15 @@ export class FakeSidekickServer {
   handle(socket, request) {
     switch (request.method) {
       case "initialize":
+        if (this.setupRequiredInitialize) {
+          socket.receiveFailure(
+            request.id,
+            "setup_required",
+            "Screen Sidekick Windows native host setup is required.",
+            { retryable: false },
+          );
+          return;
+        }
         socket.receiveSuccess(request.id, {
           codex_readiness: this.codexReadiness,
           limits: readyProtocolLimits(),
@@ -401,6 +412,83 @@ export class FakeWebSocket {
         return !once;
       }),
     );
+  }
+}
+
+export class FakeNativePort {
+  constructor(server) {
+    this.server = server;
+    this.sent = [];
+    this.disconnected = false;
+    this.onMessage = new FakeChromeEvent();
+    this.onDisconnect = new FakeChromeEvent();
+    server.socket = this;
+    server.sockets.push(this);
+  }
+
+  postMessage(request) {
+    this.sent.push(request);
+    this.server.handle(this, request);
+  }
+
+  disconnect() {
+    if (this.disconnected) {
+      return;
+    }
+    this.disconnected = true;
+    this.onDisconnect.dispatch();
+  }
+
+  close() {
+    this.disconnect();
+  }
+
+  receiveSuccess(id, result) {
+    this.receive({
+      jsonrpc: "2.0",
+      id,
+      result,
+    });
+  }
+
+  receiveFailure(id, code, message, data = undefined) {
+    this.receive({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code,
+        message,
+        ...(data === undefined ? {} : { data }),
+      },
+    });
+  }
+
+  receiveNotification(method, params) {
+    this.receive({
+      jsonrpc: "2.0",
+      method,
+      params,
+    });
+  }
+
+  receive(value) {
+    this.onMessage.dispatch(value);
+  }
+}
+
+class FakeChromeEvent {
+  constructor() {
+    this.listeners = [];
+  }
+
+  addListener(listener) {
+    this.listeners.push(listener);
+  }
+
+  dispatch(value) {
+    for (const listener of this.listeners) {
+      listener(value);
+    }
   }
 }
 

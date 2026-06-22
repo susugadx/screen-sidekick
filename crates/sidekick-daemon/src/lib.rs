@@ -26,15 +26,22 @@ use http_boundary::{
     legacy_capture, legacy_preflight, validate_extension_origin_for_optional_header,
     DaemonRejection,
 };
-use protocol::websocket_loop;
+use protocol::{websocket_loop, WebSocketConnectionKind};
 use screen_sidekick_codex_client::{CodexTurnClient, StdioCodexClient};
 use screen_sidekick_session::{SessionStore, SessionStoreError};
 use screen_sidekick_sidekick_protocol::{JsonRpcNotification, ProtocolLimits};
 use serde::Serialize;
-use tokio::sync::{broadcast, oneshot};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::{broadcast, oneshot},
+};
 use uuid::Uuid;
 
+pub use protocol::{ProtocolConnection, ProtocolConnectionAuth};
+
 pub const DAEMON_STATUS_SCHEMA_VERSION: &str = "sidekick_daemon_status.v0.1";
+pub const SIDECAR_OWNED_WEBSOCKET_HEADER: &str = "x-screen-sidekick-sidecar-owned";
+pub const SIDECAR_OWNED_WEBSOCKET_HEADER_VALUE: &str = "1";
 pub const MAX_CAPTURE_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 pub const MAX_ATTACHMENT_BYTES: usize = 128 * 1024;
@@ -82,7 +89,27 @@ impl Default for DaemonOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonStartupRecovery {
+    RecoverInterrupted,
+    SkipInterrupted,
+}
+
+impl DaemonStartupRecovery {
+    fn should_recover_interrupted_turns(self) -> bool {
+        matches!(self, Self::RecoverInterrupted)
+    }
+}
+
 impl DaemonState {
+    pub fn default_runtime_state() -> Result<Self, DaemonStartError> {
+        let token = Uuid::new_v4().to_string();
+        let db_path = default_database_path().map_err(DaemonStartError::DatabasePath)?;
+        let store = SessionStore::open(db_path).map_err(DaemonStartError::SessionStore)?;
+        let codex = Arc::new(StdioCodexClient::default());
+        Ok(Self::new(token, store, codex))
+    }
+
     #[must_use]
     pub fn new(
         token: impl Into<String>,
@@ -119,6 +146,10 @@ impl DaemonState {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    pub fn recover_interrupted_turns(&self) -> Result<(), SessionStoreError> {
+        self.store.recover_interrupted_active_turns().map(|_| ())
+    }
 }
 
 pub struct DaemonRuntime {
@@ -129,18 +160,32 @@ pub struct DaemonRuntime {
 
 impl DaemonRuntime {
     pub fn start() -> Result<(Self, DaemonStatus), DaemonStartError> {
-        let token = Uuid::new_v4().to_string();
-        let db_path = default_database_path().map_err(DaemonStartError::DatabasePath)?;
-        let store = SessionStore::open(db_path).map_err(DaemonStartError::SessionStore)?;
-        let codex = Arc::new(StdioCodexClient::default());
-        Self::start_with_state(DaemonState::new(token, store, codex))
+        Self::start_with_startup_recovery(DaemonStartupRecovery::RecoverInterrupted)
+    }
+
+    pub fn start_with_startup_recovery(
+        startup_recovery: DaemonStartupRecovery,
+    ) -> Result<(Self, DaemonStatus), DaemonStartError> {
+        let state = DaemonState::default_runtime_state()?;
+        Self::start_with_state_and_startup_recovery(state, startup_recovery)
     }
 
     pub fn start_with_state(state: DaemonState) -> Result<(Self, DaemonStatus), DaemonStartError> {
-        state
-            .store
-            .recover_interrupted_active_turns()
-            .map_err(DaemonStartError::SessionStore)?;
+        Self::start_with_state_and_startup_recovery(
+            state,
+            DaemonStartupRecovery::RecoverInterrupted,
+        )
+    }
+
+    pub fn start_with_state_and_startup_recovery(
+        state: DaemonState,
+        startup_recovery: DaemonStartupRecovery,
+    ) -> Result<(Self, DaemonStatus), DaemonStartError> {
+        if startup_recovery.should_recover_interrupted_turns() {
+            state
+                .recover_interrupted_turns()
+                .map_err(DaemonStartError::SessionStore)?;
+        }
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(DaemonStartError::Bind)?;
         listener
@@ -226,6 +271,70 @@ impl Error for DaemonStartError {
     }
 }
 
+#[derive(Debug)]
+pub enum DaemonStdioStatusError {
+    Start(DaemonStartError),
+    Serialize(serde_json::Error),
+    Stdout(io::Error),
+    Stdin(io::Error),
+}
+
+impl fmt::Display for DaemonStdioStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start(_) => formatter.write_str("failed to start daemon for stdio status"),
+            Self::Serialize(_) => formatter.write_str("failed to serialize daemon status"),
+            Self::Stdout(_) => formatter.write_str("failed to write daemon status to stdout"),
+            Self::Stdin(_) => formatter.write_str("failed to monitor daemon stdin"),
+        }
+    }
+}
+
+impl Error for DaemonStdioStatusError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Start(error) => Some(error),
+            Self::Serialize(error) => Some(error),
+            Self::Stdout(error) | Self::Stdin(error) => Some(error),
+        }
+    }
+}
+
+pub async fn run_stdio_status_daemon<R, W>(
+    mut stdin: R,
+    mut stdout: W,
+) -> Result<(), DaemonStdioStatusError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let (runtime, status) =
+        DaemonRuntime::start_with_startup_recovery(DaemonStartupRecovery::SkipInterrupted)
+            .map_err(DaemonStdioStatusError::Start)?;
+    let mut status_line =
+        serde_json::to_string(&status).map_err(DaemonStdioStatusError::Serialize)?;
+    status_line.push('\n');
+    stdout
+        .write_all(status_line.as_bytes())
+        .await
+        .map_err(DaemonStdioStatusError::Stdout)?;
+    stdout
+        .flush()
+        .await
+        .map_err(DaemonStdioStatusError::Stdout)?;
+
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match stdin.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => return Err(DaemonStdioStatusError::Stdin(error)),
+        }
+    }
+    drop(runtime);
+    Ok(())
+}
+
 pub fn build_daemon_router(state: DaemonState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -278,10 +387,20 @@ async fn ws_upgrade(
     websocket: WebSocketUpgrade,
 ) -> Result<Response<Body>, DaemonRejection> {
     validate_extension_origin_for_optional_header(&headers)?;
+    let connection_kind = websocket_connection_kind(&headers);
     Ok(websocket
         .max_message_size(MAX_WS_MESSAGE_BYTES)
-        .on_upgrade(move |socket| websocket_loop(socket, state))
+        .on_upgrade(move |socket| websocket_loop(socket, state, connection_kind))
         .into_response())
+}
+
+fn websocket_connection_kind(headers: &HeaderMap) -> WebSocketConnectionKind {
+    match headers.get(SIDECAR_OWNED_WEBSOCKET_HEADER) {
+        Some(value) if value.as_bytes() == SIDECAR_OWNED_WEBSOCKET_HEADER_VALUE.as_bytes() => {
+            WebSocketConnectionKind::SidecarOwned
+        }
+        Some(_) | None => WebSocketConnectionKind::Browser,
+    }
 }
 
 fn default_database_path() -> io::Result<PathBuf> {
@@ -343,13 +462,18 @@ fn create_private_database_file(database_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::time::Duration;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use screen_sidekick_session::{BeginTurn, SessionStore};
+    use screen_sidekick_sidekick_protocol::TurnStatus;
+    use serde_json::Value;
+    use tokio::io::{duplex, AsyncBufReadExt, AsyncReadExt, BufReader};
 
-    #[test]
-    fn default_database_path_uses_xdg_app_data_directory() {
-        let _guard = ENV_LOCK.lock().expect("env lock is not poisoned");
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn default_database_path_uses_xdg_app_data_directory() {
+        let _guard = ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().expect("temp dir is created");
         let _xdg_data_home = EnvVarGuard::set("XDG_DATA_HOME", temp.path());
 
@@ -398,6 +522,112 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[tokio::test]
+    async fn stdio_status_writes_status_once_and_waits_for_stdin_close() {
+        let _guard = ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().expect("temp dir is created");
+        let _xdg_data_home = EnvVarGuard::set("XDG_DATA_HOME", temp.path());
+        let (stdin_writer, stdin_reader) = duplex(64);
+        let (stdout_writer, stdout_reader) = duplex(4096);
+        let mut task = tokio::spawn(super::run_stdio_status_daemon(stdin_reader, stdout_writer));
+        let mut stdout_reader = BufReader::new(stdout_reader);
+        let mut line = String::new();
+
+        tokio::time::timeout(Duration::from_secs(5), stdout_reader.read_line(&mut line))
+            .await
+            .expect("status line is written")
+            .expect("status line is readable");
+        let status: Value = serde_json::from_str(line.trim_end()).expect("status is JSON");
+
+        assert_eq!(
+            status["schema_version"],
+            super::DAEMON_STATUS_SCHEMA_VERSION
+        );
+        assert_eq!(status["status"], "running");
+        assert!(status["ws_url"]
+            .as_str()
+            .expect("ws_url is present")
+            .starts_with("ws://127.0.0.1:"));
+        assert!(status["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err(),
+            "daemon stays alive while stdin is open"
+        );
+
+        drop(stdin_writer);
+        tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .expect("daemon exits after stdin closes")
+            .expect("daemon task joins")
+            .expect("stdio status daemon succeeds");
+        let mut remaining_stdout = String::new();
+        stdout_reader
+            .read_to_string(&mut remaining_stdout)
+            .await
+            .expect("remaining stdout is readable");
+
+        assert!(remaining_stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stdio_status_does_not_recover_existing_active_turns() {
+        let _guard = ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().expect("temp dir is created");
+        let _xdg_data_home = EnvVarGuard::set("XDG_DATA_HOME", temp.path());
+        let db_path = super::default_database_path().expect("database path is prepared");
+        let store = SessionStore::open(&db_path).expect("session store opens");
+        let session = store
+            .create_session(Some("Live WSL turn"))
+            .expect("session is created");
+        let live_turn = store
+            .begin_turn(BeginTurn {
+                session_id: session.id.clone(),
+                user_text: "live".to_owned(),
+                attachment_ids: Vec::new(),
+                idempotency_key: "live-key".to_owned(),
+                request_hash: "live-hash".to_owned(),
+            })
+            .expect("turn begins");
+        store
+            .mark_turn_running(
+                &live_turn.turn_id,
+                Some("remote_thread"),
+                Some("remote_turn"),
+            )
+            .expect("turn is marked running");
+
+        let (stdin_writer, stdin_reader) = duplex(64);
+        let (stdout_writer, stdout_reader) = duplex(4096);
+        let mut task = tokio::spawn(super::run_stdio_status_daemon(stdin_reader, stdout_writer));
+        let mut stdout_reader = BufReader::new(stdout_reader);
+        let mut line = String::new();
+
+        tokio::time::timeout(Duration::from_secs(5), stdout_reader.read_line(&mut line))
+            .await
+            .expect("status line is written")
+            .expect("status line is readable");
+
+        let preserved_turn = store.get_turn(&live_turn.turn_id).expect("turn loads");
+        let preserved_session = store.get_session(&session.id).expect("session loads");
+        assert_eq!(preserved_turn.status, TurnStatus::Running);
+        assert_eq!(
+            preserved_session.session.active_turn_id.as_deref(),
+            Some(live_turn.turn_id.as_str())
+        );
+        assert!(preserved_session.active_turn.is_some());
+
+        drop(stdin_writer);
+        tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .expect("daemon exits after stdin closes")
+            .expect("daemon task joins")
+            .expect("stdio status daemon succeeds");
     }
 
     struct EnvVarGuard {

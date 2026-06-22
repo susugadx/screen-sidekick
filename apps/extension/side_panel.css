@@ -159,6 +159,21 @@ pre {
   gap: 9px;
 }
 
+.quick-questions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.quick-questions button {
+  min-height: 32px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  border-color: #8eb39d;
+  color: #244333;
+  background: #eef6f0;
+}
+
 #message-input {
   min-height: 74px;
   resize: vertical;

@@ -5,6 +5,7 @@ import { installManualTimers, waitForMicrotasks } from "./manual_timers.mjs";
 import {
   assertDifferentMessageSendRequest,
   assertSameMessageSendRequest,
+  assertQuickQuestionsDisabled,
   captureBridgeResponse,
   currentActiveChatMarker,
   element,
@@ -19,6 +20,99 @@ import {
   waitForStoredActiveChat,
 } from "./support/side_panel_harness.mjs";
 
+test("uses native messaging as the default ask transport without daemon settings", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  submitMessage("Native question");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question");
+});
+
+test("quick question fills the draft without sending", async () => {
+  const server = installSidePanelHarness();
+  await importFreshSidePanel();
+
+  element("quick-question-what").click();
+
+  assert.equal(element("message-input").value, "これなに？");
+  assert.equal(document.activeElement, element("message-input"));
+  assert.equal(server.sendCount, 0);
+  assert.equal(server.messageSendRequests.length, 0);
+  assert.equal(messageRows().length, 0);
+});
+
+test("uses native messaging for ask when only fallback daemon URL is filled", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  element("bridge-url").value = "ws://127.0.0.1:43001/v0/ws";
+  submitMessage("Native question with URL only");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.notEqual(element("status").textContent, "Daemon URL and pairing token are required");
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question with URL only");
+});
+
+test("uses native messaging for ask when only fallback pairing token is filled", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    storage: {
+      daemonSettings: undefined,
+    },
+  });
+  await importFreshSidePanel("");
+
+  element("bridge-token").value = "pairing-token";
+  submitMessage("Native question with token only");
+  await waitFor(() => server.sendCount === 1);
+
+  assert.equal(server.socket.url, undefined);
+  assert.notEqual(element("status").textContent, "Daemon URL and pairing token are required");
+  assert.equal(server.socket.sent[0]?.method, "initialize");
+  assert.equal(server.socket.sent[0]?.params.auth_token, undefined);
+  assert.equal(server.messageSendRequests[0]?.text, "Native question with token only");
+});
+
+test("native setup-required error does not fall back to saved websocket settings", async () => {
+  const server = installSidePanelHarness({
+    native: true,
+    setupRequiredInitialize: true,
+  });
+  await importFreshSidePanel();
+
+  submitMessage("Needs native setup");
+  await waitFor(
+    () =>
+      element("status").textContent ===
+      "Screen Sidekick Windows native host setup is required.",
+  );
+
+  assert.equal(server.sockets.length, 1);
+  assert.equal(server.socket.url, undefined);
+  assert.equal(server.sessionCreateCount, 0);
+  assert.equal(server.attachCount, 0);
+  assert.equal(server.sendCount, 0);
+  assert.equal(element("message-input").value, "Needs native setup");
+});
+
 test("keeps ask controls disabled after message send response until turn completes", async () => {
   const server = installSidePanelHarness();
   await importFreshSidePanel();
@@ -28,6 +122,7 @@ test("keeps ask controls disabled after message send response until turn complet
 
   assert.equal(element("ask").disabled, true);
   assert.equal(element("message-input").disabled, true);
+  assertQuickQuestionsDisabled(true);
 
   server.socket.receiveNotification("turn/completed", {
     session_id: "sess_1",
@@ -40,6 +135,7 @@ test("keeps ask controls disabled after message send response until turn complet
   await waitFor(() => element("ask").disabled === false);
 
   assert.equal(element("message-input").disabled, false);
+  assertQuickQuestionsDisabled(false);
 });
 
 test("renders the user message before the assistant placeholder when send response wins the race", async () => {
@@ -653,6 +749,7 @@ test("delayed message send response keeps ask disabled until turn completes", as
 
     assert.equal(element("ask").disabled, true);
     assert.equal(element("message-input").disabled, true);
+    assertQuickQuestionsDisabled(true);
     assert.equal(element("status").textContent, "Capturing");
     assert.equal(transcriptText().includes("Slow question"), true);
     assert.equal(messageRows().length, 1);
@@ -676,6 +773,7 @@ test("delayed message send response keeps ask disabled until turn completes", as
   assert.equal(marker.activeTurnId, "turn_1");
   assert.equal(element("ask").disabled, true);
   assert.equal(element("message-input").disabled, true);
+  assertQuickQuestionsDisabled(true);
   assert.equal(messageRows().length, 2);
 
   server.socket.receiveNotification("turn/completed", {
@@ -690,5 +788,6 @@ test("delayed message send response keeps ask disabled until turn completes", as
 
   assert.equal(element("ask").disabled, false);
   assert.equal(element("message-input").disabled, false);
+  assertQuickQuestionsDisabled(false);
   assert.equal(element("status").textContent, "Ready");
 });

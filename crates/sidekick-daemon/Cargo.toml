@@ -5,6 +5,10 @@ rust-version.workspace = true
 version.workspace = true
 publish = false
 
+[[bin]]
+name = "screen-sidekick-daemon"
+path = "src/main.rs"
+
 [dependencies]
 axum.workspace = true
 directories.workspace = true

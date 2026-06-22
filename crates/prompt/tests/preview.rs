@@ -20,6 +20,13 @@ fn builds_prompt_from_safety_reviewed_context() {
     let review = review_screen_context(&context);
     let preview = build_prompt_from_review(&review);
 
+    assert!(preview
+        .text
+        .starts_with("Screen Sidekick assistant context preview."));
+    assert!(preview.text.contains(
+        "Answer guidance: explain meaning, next step, safety confirmations, and missing information"
+    ));
+    assert!(!preview.text.contains("Screen Sidekick handoff for Codex"));
     assert!(preview.text.contains("Users Admin"));
     assert!(preview.text.contains("Delete user"));
     assert!(preview.text.contains("destructive action"));

@@ -1,0 +1,7 @@
+{
+  "name": "com.screen_sidekick.host",
+  "description": "Screen Sidekick Native Messaging Host",
+  "path": "${HOST_PATH}",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://${EXTENSION_ID}/"]
+}

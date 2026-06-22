@@ -146,6 +146,7 @@ pub enum ErrorCode {
     Unauthorized,
     ForbiddenOrigin,
     UnsupportedProtocolVersion,
+    SetupRequired,
     InvalidRequest,
     InvalidParams,
     MethodNotFound,
