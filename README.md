@@ -91,13 +91,25 @@ Windows native host, build the WSL daemon and extension, register the
 browser-specific Native Messaging manifest for the exact extension ID, write the
 WSL auto-start config, run a setup doctor/smoke check, and provide uninstall.
 
-Planned local commands:
+Local setup commands:
 
 ```sh
-npm run sidekick:install-local -- --browser edge
-npm run sidekick:doctor-local -- --browser edge
+npm run sidekick:install-local -- \
+  --browser edge \
+  --extension-id <32-character-extension-id> \
+  --host-path 'C:\path\to\screen-sidekick-native-host.exe' \
+  --wsl-workdir /home/<user>/dev/projects/screen-sidekick
+
+npm run sidekick:doctor-local -- --browser edge --extension-id <32-character-extension-id>
 npm run sidekick:uninstall-local -- --browser edge
 ```
+
+The commands also accept environment defaults:
+`SCREEN_SIDEKICK_EXTENSION_ID`, `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`,
+`SCREEN_SIDEKICK_WSL_DISTRO`, `SCREEN_SIDEKICK_WSL_WORKDIR`, and
+`SCREEN_SIDEKICK_WSL_DAEMON_BINARY`. If `--wsl-workdir` is omitted, set
+`SCREEN_SIDEKICK_WSL_WORKDIR` first. From WSL/Linux, use `--dry-run` for the
+Windows registry/config step; actual HKCU/APPDATA writes must run from Windows.
 
 Store publication, code signing, and a formal Windows installer are later
 distribution work. Keep them separate until the local setup path is repeatable.

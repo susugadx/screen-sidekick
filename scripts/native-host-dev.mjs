@@ -4,12 +4,21 @@ import { homedir, platform } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  BROWSERS,
+  CONFIG_ENV,
+  CONFIG_SCHEMA_VERSION,
+  DESCRIPTION,
+  HOST_NAME,
+  browserError,
+  extensionIdError,
+  isWindowsAbsolutePath,
+  joinWindowsPath,
+  linuxPathError,
+  windowsRegistryKey,
+  wslDistroError,
+} from "./native-host-shared.mjs";
 
-const HOST_NAME = "com.screen_sidekick.host";
-const DESCRIPTION = "Screen Sidekick Native Messaging Host";
-const CONFIG_SCHEMA_VERSION = "screen_sidekick_native_host_config.v0.1";
-const CONFIG_ENV = "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG";
-const BROWSERS = new Set(["chrome", "chrome-for-testing", "chromium", "edge"]);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function main(argv) {
@@ -26,7 +35,7 @@ function main(argv) {
       uninstall(options);
       return;
     case "locations":
-      printLocations();
+      printLocations(options);
       return;
     default:
       usage(command ? `unknown command: ${command}` : null);
@@ -34,10 +43,11 @@ function main(argv) {
 }
 
 function generate(options) {
+  rejectTargetPlatformOption(options, "generate");
   const extensionId = requireExtensionId(options);
   const targetPlatform = targetPlatformForOptions(options);
   const wslConfig = buildWslConfig(options);
-  ensureTargetCanBeWritten(targetPlatform, options.dryRun);
+  ensureTargetCanBeWritten(targetPlatform, options.dryRun, "generate");
   const hostPath = requireHostPath(options, targetPlatform, Boolean(wslConfig));
   const manifestPath = options.out
     ? resolve(options.out)
@@ -50,11 +60,12 @@ function generate(options) {
 }
 
 function install(options) {
+  rejectTargetPlatformOption(options, "install");
   const browser = requireBrowser(options);
   const extensionId = requireExtensionId(options);
   const targetPlatform = targetPlatformForOptions(options);
   const wslConfig = buildWslConfig(options);
-  ensureTargetCanBeWritten(targetPlatform, options.dryRun);
+  ensureTargetCanBeWritten(targetPlatform, options.dryRun, "install");
   requireWindowsInstallRuntimeConfig(targetPlatform, wslConfig);
   const hostPath = requireHostPath(options, targetPlatform, Boolean(wslConfig));
   const manifestPath = options.manifestPath
@@ -81,12 +92,14 @@ function install(options) {
 
 function uninstall(options) {
   const browser = requireBrowser(options);
-  if (platform() === "win32") {
+  const targetPlatform = targetPlatformFromOption(options) ?? platform();
+  ensureTargetCanBeWritten(targetPlatform, options.dryRun, "uninstall");
+  if (targetPlatform === "win32") {
     const key = windowsRegistryKey(browser);
     runOrPrint(["reg", "delete", key, "/f"], options.dryRun);
     return;
   }
-  const targetPath = userManifestPath(browser);
+  const targetPath = userManifestPath(browser, targetPlatform);
   if (options.dryRun) {
     console.log(`Would remove ${targetPath}`);
     return;
@@ -139,16 +152,18 @@ function writeJsonFile(filePath, value, dryRun) {
 
 function requireBrowser(options) {
   const browser = options.browser;
-  if (!browser || !BROWSERS.has(browser)) {
-    usage("missing or invalid --browser");
+  const error = browserError(browser);
+  if (error) {
+    usage(error);
   }
   return browser;
 }
 
 function requireExtensionId(options) {
   const extensionId = options.extensionId;
-  if (!extensionId || !/^[a-p]{32}$/.test(extensionId)) {
-    usage("--extension-id must be a 32-character Chrome extension ID");
+  const error = extensionIdError(extensionId);
+  if (error) {
+    usage(error);
   }
   return extensionId;
 }
@@ -178,27 +193,51 @@ function defaultGeneratedManifestPath() {
   return join(repoRoot, "target", "native-host", `${HOST_NAME}.json`);
 }
 
-function userManifestPath(browser) {
-  const home = homedir();
-  if (platform() === "darwin") {
+function userManifestPath(browser, targetPlatform = platform()) {
+  const home = targetHomeDirectory(targetPlatform);
+  if (targetPlatform === "darwin") {
     const dirs = {
       chrome: ["Library", "Application Support", "Google", "Chrome"],
       "chrome-for-testing": ["Library", "Application Support", "Google", "ChromeForTesting"],
       chromium: ["Library", "Application Support", "Chromium"],
       edge: ["Library", "Application Support", "Microsoft Edge"],
     };
-    return join(home, ...dirs[browser], "NativeMessagingHosts", `${HOST_NAME}.json`);
+    return joinUnixPath(home, ...dirs[browser], "NativeMessagingHosts", `${HOST_NAME}.json`);
   }
-  if (platform() === "linux") {
+  if (targetPlatform === "linux") {
     const dirs = {
       chrome: [".config", "google-chrome"],
       "chrome-for-testing": [".config", "google-chrome-for-testing"],
       chromium: [".config", "chromium"],
       edge: [".config", "microsoft-edge"],
     };
-    return join(home, ...dirs[browser], "NativeMessagingHosts", `${HOST_NAME}.json`);
+    return joinUnixPath(home, ...dirs[browser], "NativeMessagingHosts", `${HOST_NAME}.json`);
   }
   return defaultGeneratedManifestPath();
+}
+
+function targetHomeDirectory(targetPlatform) {
+  return targetPlatform === platform() ? homedir() : "~";
+}
+
+function joinUnixPath(...parts) {
+  return parts.join("/").replace(/\/+/g, "/");
+}
+
+function targetPlatformFromOption(options) {
+  if (!options.targetPlatform) {
+    return null;
+  }
+  if (!["win32", "linux", "darwin"].includes(options.targetPlatform)) {
+    usage("--target-platform must be win32, linux, or darwin");
+  }
+  return options.targetPlatform;
+}
+
+function rejectTargetPlatformOption(options, command) {
+  if (options.targetPlatform) {
+    usage(`--target-platform is not supported for ${command}`);
+  }
 }
 
 function targetPlatformForOptions(options) {
@@ -211,10 +250,14 @@ function hasWslConfigOptions(options) {
   return Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary);
 }
 
-function ensureTargetCanBeWritten(targetPlatform, dryRun) {
-  if (targetPlatform === "win32" && platform() !== "win32" && !dryRun) {
-    usage("Windows native host setup must run on Windows; use --dry-run to preview it elsewhere");
+function ensureTargetCanBeWritten(targetPlatform, dryRun, command) {
+  if (dryRun || targetPlatform === platform()) {
+    return;
   }
+  if (command === "uninstall") {
+    usage("cross-platform uninstall must use --dry-run");
+  }
+  usage("cross-platform native host setup must use --dry-run");
 }
 
 function requireWindowsInstallRuntimeConfig(targetPlatform, wslConfig) {
@@ -245,10 +288,6 @@ function isAbsoluteForTarget(filePath, targetPlatform) {
   return isAbsolute(filePath);
 }
 
-function isWindowsAbsolutePath(filePath) {
-  return /^[A-Za-z]:[\\/]/.test(filePath) || /^\\\\/.test(filePath);
-}
-
 function nativeHostConfigPath(targetPlatform, dryRun) {
   if (process.env[CONFIG_ENV]) {
     return process.env[CONFIG_ENV];
@@ -263,20 +302,6 @@ function nativeHostConfigPath(targetPlatform, dryRun) {
   return joinWindowsPath(appData ?? "%APPDATA%", "Screen Sidekick", "native-host-config.json");
 }
 
-function joinWindowsPath(...parts) {
-  return parts.join("\\");
-}
-
-function windowsRegistryKey(browser) {
-  const roots = {
-    chrome: "Google\\Chrome",
-    "chrome-for-testing": "Google\\ChromeForTesting",
-    chromium: "Chromium",
-    edge: "Microsoft\\Edge",
-  };
-  return `HKCU\\Software\\${roots[browser]}\\NativeMessagingHosts\\${HOST_NAME}`;
-}
-
 function runOrPrint(command, dryRun) {
   if (dryRun) {
     console.log(`Would run: ${command.map(shellQuote).join(" ")}`);
@@ -288,12 +313,14 @@ function runOrPrint(command, dryRun) {
   }
 }
 
-function printLocations() {
-  for (const browser of BROWSERS) {
-    if (platform() === "win32") {
+function printLocations(options) {
+  const targetPlatform = targetPlatformFromOption(options) ?? platform();
+  const browsers = options.browser ? [requireBrowser(options)] : BROWSERS;
+  for (const browser of browsers) {
+    if (targetPlatform === "win32") {
       console.log(`${browser}: ${windowsRegistryKey(browser)}`);
     } else {
-      console.log(`${browser}: ${userManifestPath(browser)}`);
+      console.log(`${browser}: ${userManifestPath(browser, targetPlatform)}`);
     }
   }
 }
@@ -332,6 +359,9 @@ function parseArgs(args) {
       case "--dry-run":
         options.dryRun = true;
         break;
+      case "--target-platform":
+        options.targetPlatform = takeValue(args, ++index, arg);
+        break;
       default:
         usage(`unknown option: ${arg}`);
     }
@@ -355,26 +385,16 @@ function takeValue(args, index, option) {
 }
 
 function validateWslDistro(value) {
-  if (
-    value.trim() !== value ||
-    value.length === 0 ||
-    value.length > 128 ||
-    /[/"'\\\x00-\x1f\x7f]/.test(value)
-  ) {
-    usage("--wsl-distro is invalid");
+  const error = wslDistroError(value);
+  if (error) {
+    usage(error);
   }
 }
 
 function validateLinuxPath(value, option, allowRoot) {
-  if (
-    value.trim() !== value ||
-    !value.startsWith("/") ||
-    (!allowRoot && value === "/") ||
-    value.includes("\\") ||
-    /[\x00-\x1f\x7f]/.test(value) ||
-    value.split("/").includes("..")
-  ) {
-    usage(`${option} must be an absolute Linux path without parent traversal`);
+  const error = linuxPathError(value, option, allowRoot);
+  if (error) {
+    usage(error);
   }
 }
 
@@ -385,8 +405,8 @@ function usage(error) {
   console.error(`Usage:
   node scripts/native-host-dev.mjs generate --extension-id <32-char-id> [--host-path <path>] [--out <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
   node scripts/native-host-dev.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> [--host-path <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
-  node scripts/native-host-dev.mjs uninstall --browser <chrome|chrome-for-testing|chromium|edge> [--dry-run]
-  node scripts/native-host-dev.mjs locations`);
+  node scripts/native-host-dev.mjs uninstall --browser <chrome|chrome-for-testing|chromium|edge> [--target-platform <win32|linux|darwin>] [--dry-run]
+  node scripts/native-host-dev.mjs locations [--browser <chrome|chrome-for-testing|chromium|edge>] [--target-platform <win32|linux|darwin>]`);
   process.exit(2);
 }
 

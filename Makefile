@@ -1,6 +1,6 @@
 RUST_TOOLCHAIN := 1.96.0
 
-.PHONY: doctor setup fmt fmt-check clippy test check ci-check extension-typecheck extension-build extension-test extension-manifest-check desktop-bridge-test desktop-check desktop-ui-check desktop-dev codex-schema-refresh codex-schema-check codex-schema-metadata
+.PHONY: doctor setup fmt fmt-check clippy test check ci-check extension-typecheck extension-build extension-test extension-manifest-check local-setup-test desktop-bridge-test desktop-check desktop-ui-check desktop-dev codex-schema-refresh codex-schema-check codex-schema-metadata
 
 doctor:
 	@command -v rustup >/dev/null || { echo "rustup not found. Install Rust from https://rustup.rs/"; exit 1; }
@@ -39,6 +39,9 @@ extension-test:
 extension-manifest-check:
 	node apps/extension/check-manifest.mjs
 
+local-setup-test:
+	npm run test:local-setup
+
 desktop-bridge-test:
 	cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
 
@@ -60,6 +63,6 @@ codex-schema-check:
 codex-schema-metadata:
 	@cat crates/codex-client/schema/metadata.json
 
-check: fmt-check clippy test extension-typecheck extension-test extension-manifest-check desktop-bridge-test
+check: fmt-check clippy test extension-typecheck extension-test extension-manifest-check local-setup-test desktop-bridge-test
 
 ci-check: check desktop-check desktop-ui-check

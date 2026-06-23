@@ -208,3 +208,40 @@ If both variables are present, this explicit sidecar connection has priority on
 all platforms. If either variable is missing, Linux and macOS hosts start the
 in-process Sidekick runtime. Windows hosts use WSL auto-start config instead.
 The host does not scan ports or read token files.
+
+### Local Alpha Setup Commands
+
+The root package exposes local setup wrappers for the Windows Chrome/Edge + WSL
+development path:
+
+```sh
+npm run sidekick:install-local -- \
+  --browser edge \
+  --extension-id <32-character-extension-id> \
+  --host-path 'C:\path\to\screen-sidekick-native-host.exe' \
+  --wsl-workdir /home/<user>/dev/projects/screen-sidekick
+
+npm run sidekick:doctor-local -- --browser edge --extension-id <32-character-extension-id>
+npm run sidekick:uninstall-local -- --browser edge
+```
+
+`install-local` builds the WSL daemon and extension, then delegates manifest,
+registry, and WSL config generation to `scripts/native-host-dev.mjs`. It does
+not build the Windows native host executable; provide that path explicitly or
+through `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`.
+
+The setup wrappers accept these environment defaults:
+
+```text
+SCREEN_SIDEKICK_EXTENSION_ID
+SCREEN_SIDEKICK_WINDOWS_HOST_PATH
+SCREEN_SIDEKICK_WSL_DISTRO
+SCREEN_SIDEKICK_WSL_WORKDIR
+SCREEN_SIDEKICK_WSL_DAEMON_BINARY
+```
+
+When run from WSL/Linux, pass `--dry-run` to preview the Windows
+HKCU/APPDATA writes. Actual Windows registry/config writes must run from
+Windows. If the install command omits `--wsl-workdir`, set
+`SCREEN_SIDEKICK_WSL_WORKDIR` first. `doctor-local --dry-run` validates resolved
+options without spawning process checks.
