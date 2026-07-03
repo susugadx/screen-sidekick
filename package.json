@@ -1,0 +1,12 @@
+{
+  "name": "screen-sidekick-local",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sidekick:install-local": "node scripts/sidekick-local-setup.mjs install",
+    "sidekick:doctor-local": "node scripts/sidekick-local-setup.mjs doctor",
+    "sidekick:uninstall-local": "node scripts/sidekick-local-setup.mjs uninstall",
+    "test:local-setup": "node --test scripts/native-host-dev.test.mjs scripts/sidekick-local-setup.test.mjs"
+  }
+}

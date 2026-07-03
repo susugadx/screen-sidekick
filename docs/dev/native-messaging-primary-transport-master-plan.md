@@ -193,6 +193,7 @@ Desktop status / debug / fallback UI:
 | Final-A automated impact audit | Done for implemented code path | error sanitization tests, port-close tests, fallback tests, prior implementation verification |
 | Final-B automated refactor pass | Done for implemented code path | client core split, daemon protocol split, focused test/harness updates |
 | Windows Chrome / Edge manual smoke | Edge done / Chrome blocked in local smoke | Edge native Ask path passed on Windows -> WSL; local Google Chrome rejected command-line unpacked extension loading |
+| Local alpha setup command tranche | Initial root command done | `package.json` `sidekick:*`, `scripts/sidekick-local-setup.mjs`, dry-run tests |
 | Release / distribution readiness | Pending | extension ID, installer, signing, release manifest, CD remain undecided |
 
 The previous implementation record treats the `bc024c9` code path and the immediately preceding `make ci-check` pass as the older automated baseline.
@@ -298,7 +299,7 @@ Smoke path:
 5. Copy the unpacked extension ID from chrome://extensions or edge://extensions.
 
 6. Install dev Native Messaging host manifest and WSL config for that exact ID:
-   node scripts/native-host-dev.mjs install --browser chrome --extension-id <id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon>
+   node scripts/native-host-dev.mjs install --browser chrome --extension-id <id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --wsl-path <path-list>
 
 7. Open the side panel without opening the desktop window or WSL Chrome.
 
@@ -347,19 +348,31 @@ Release work remains undecided and should be handled as a separate tranche:
 - Add release smoke matrix for Chrome, Chrome for Testing, Chromium, Edge, Linux, macOS, Windows.
 - Decide support wording for host manifest mismatch and upgrade / uninstall.
 
-Before store publication or signing, do a smaller local alpha setup tranche.
+Before store publication or signing, keep local alpha setup as its own tranche.
 This is setup infrastructure for the assistant-first product direction, not the
 product center itself:
 
-- Add a one-command local installer / setup script for the developer machine.
-- Build/copy the Windows native host exe, WSL daemon, and extension artifacts.
-- Register the browser-specific Native Messaging manifest for the exact
-  extension ID.
-- Write `%APPDATA%\Screen Sidekick\native-host-config.json`.
-- Include a setup doctor that checks WSL, Codex CLI visibility from the native
-  host launch path, daemon status startup, manifest registration, and a protocol
-  smoke.
-- Include uninstall for the user-level registry/manifest/config entries.
+- Root `npm run sidekick:install-local` builds the WSL daemon and extension,
+  then delegates browser manifest / registry / WSL config writes to
+  `scripts/native-host-dev.mjs`.
+- Local setup can write an explicit `wsl_path` for Windows-launched
+  non-interactive WSL commands, so build, doctor, and native-host startup do not
+  rely on interactive shell init files to find Cargo, npm, or Codex. That field
+  uses native-host config schema v0.2, and setup/doctor gate it on a compatible
+  Windows host exe. Doctor also gates any installed v0.2 config on the
+  registered host exe, even if `wsl_path` is omitted. The v0.2 reader also
+  accepts legacy v0.1 configs with `wsl_path` written by earlier local setup
+  builds.
+- The Windows native host exe is still provided explicitly by `--host-path` or
+  `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`; cross-building/copying that exe is not
+  part of the first setup command.
+- `npm run sidekick:doctor-local` checks resolved inputs and, outside
+  `--dry-run`, process availability, daemon status startup, Codex CLI visibility,
+  extension build output, and Windows manifest/config surfaces where the
+  current OS can verify them.
+- `npm run sidekick:uninstall-local` delegates user-level Windows registration
+  removal and removes the local native-host config unless `--keep-config` is
+  passed.
 - Keep Store publication, code signing, and formal Windows installer work as
   later distribution tasks.
 
@@ -508,7 +521,7 @@ cargo test -p screen-sidekick-sidekick-daemon
 cargo clippy -p screen-sidekick-native-host -p screen-sidekick-sidekick-daemon --all-targets -- -D warnings
 npm --prefix apps/extension test
 node apps/extension/check-manifest.mjs
-node scripts/native-host-dev.mjs install --browser chrome --extension-id <32-char-id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --dry-run
+node scripts/native-host-dev.mjs install --browser chrome --extension-id <32-char-id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --wsl-path <path-list> --dry-run
 git diff --check
 ```
 

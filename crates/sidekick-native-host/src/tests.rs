@@ -16,6 +16,31 @@ use tokio::io::{duplex, AsyncReadExt};
 mod environment;
 mod sidecar_relay;
 
+#[test]
+fn cli_command_prints_config_schema_version_when_requested() {
+    let command = cli_command_from_args([
+        "screen-sidekick-native-host".to_owned(),
+        PRINT_CONFIG_SCHEMA_VERSION_ARG.to_owned(),
+    ]);
+
+    assert_eq!(command, NativeHostCliCommand::PrintConfigSchemaVersion);
+}
+
+#[test]
+fn cli_command_keeps_native_messaging_origin_for_normal_launch() {
+    let command = cli_command_from_args([
+        "screen-sidekick-native-host".to_owned(),
+        "chrome-extension://abcdefghijklmnop/".to_owned(),
+    ]);
+
+    assert_eq!(
+        command,
+        NativeHostCliCommand::Run {
+            caller_origin: Some("chrome-extension://abcdefghijklmnop/".to_owned())
+        }
+    );
+}
+
 #[tokio::test]
 async fn native_frame_roundtrips_utf8_json() {
     let (mut writer, mut reader) = duplex(1024);

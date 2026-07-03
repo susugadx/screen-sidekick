@@ -5,8 +5,10 @@ use std::{
 
 use serde::Deserialize;
 
-pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION: &str =
+pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1: &str =
     "screen_sidekick_native_host_config.v0.1";
+pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION: &str =
+    "screen_sidekick_native_host_config.v0.2";
 pub(crate) const SCREEN_SIDEKICK_NATIVE_HOST_CONFIG_ENV: &str =
     "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG";
 
@@ -36,6 +38,7 @@ pub(crate) struct WslAutoStartConfig {
     pub(crate) distro: String,
     pub(crate) workdir: String,
     pub(crate) daemon_binary: String,
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +114,7 @@ struct NativeHostConfigFile {
     wsl_distro: Option<String>,
     wsl_workdir: Option<String>,
     wsl_daemon_binary: Option<String>,
+    wsl_path: Option<String>,
 }
 
 pub(crate) fn parse_native_host_config(
@@ -118,7 +122,9 @@ pub(crate) fn parse_native_host_config(
 ) -> Result<NativeHostConfig, NativeHostConfigError> {
     let file: NativeHostConfigFile =
         serde_json::from_str(text).map_err(NativeHostConfigError::Parse)?;
-    if file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION {
+    if file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION
+        && file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1
+    {
         return Err(NativeHostConfigError::UnsupportedSchemaVersion);
     }
     if file.mode != "wsl_auto" {
@@ -130,11 +136,15 @@ pub(crate) fn parse_native_host_config(
     validate_wsl_distro(&distro)?;
     validate_linux_path(&workdir, "wsl_workdir", true)?;
     validate_linux_path(&daemon_binary, "wsl_daemon_binary", false)?;
+    if let Some(path) = file.wsl_path.as_deref() {
+        validate_linux_path_list(path, "wsl_path")?;
+    }
     Ok(NativeHostConfig {
         wsl: WslAutoStartConfig {
             distro,
             workdir,
             daemon_binary,
+            path: file.wsl_path,
         },
     })
 }
@@ -186,17 +196,20 @@ pub(crate) fn select_runtime(
 }
 
 pub(crate) fn build_wsl_daemon_command(config: &WslAutoStartConfig) -> WslCommandSpec {
+    let mut args = vec![
+        "-d".to_owned(),
+        config.distro.clone(),
+        "--cd".to_owned(),
+        config.workdir.clone(),
+        "--exec".to_owned(),
+    ];
+    if let Some(path) = &config.path {
+        args.extend(["env".to_owned(), format!("PATH={path}")]);
+    }
+    args.extend([config.daemon_binary.clone(), "--stdio-status".to_owned()]);
     WslCommandSpec {
         program: "wsl.exe".to_owned(),
-        args: vec![
-            "-d".to_owned(),
-            config.distro.clone(),
-            "--cd".to_owned(),
-            config.workdir.clone(),
-            "--exec".to_owned(),
-            config.daemon_binary.clone(),
-            "--stdio-status".to_owned(),
-        ],
+        args,
     }
 }
 
@@ -237,6 +250,19 @@ fn validate_linux_path(
     Ok(())
 }
 
+fn validate_linux_path_list(value: &str, field: &'static str) -> Result<(), NativeHostConfigError> {
+    if value.trim() != value || value.is_empty() || value.contains('\\') {
+        return Err(NativeHostConfigError::InvalidLinuxPath(field));
+    }
+    for segment in value.split(':') {
+        if segment.is_empty() {
+            return Err(NativeHostConfigError::InvalidLinuxPath(field));
+        }
+        validate_linux_path(segment, field, false)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +279,20 @@ mod tests {
         .to_string()
     }
 
+    fn valid_v1_config() -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_config()).expect("config json parses");
+        value["schema_version"] = json!(NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1);
+        value.to_string()
+    }
+
+    fn valid_config_with_path() -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/.nvm/versions/node/v22.20.0/bin:/home/susu/.cargo/bin:/usr/local/bin:/usr/bin:/bin");
+        value.to_string()
+    }
+
     #[test]
     fn config_parser_accepts_valid_wsl_auto_config() {
         let config = parse_native_host_config(&valid_config()).expect("config parses");
@@ -262,6 +302,25 @@ mod tests {
         assert_eq!(
             config.wsl.daemon_binary,
             "/home/susu/screen sidekick/target/debug/screen-sidekick-daemon"
+        );
+        assert_eq!(config.wsl.path, None);
+    }
+
+    #[test]
+    fn config_parser_accepts_legacy_v1_config_without_wsl_path() {
+        let config = parse_native_host_config(&valid_v1_config()).expect("config parses");
+
+        assert_eq!(config.wsl.distro, "Ubuntu-24.04");
+        assert_eq!(config.wsl.path, None);
+    }
+
+    #[test]
+    fn config_parser_accepts_optional_wsl_path() {
+        let config = parse_native_host_config(&valid_config_with_path()).expect("config parses");
+
+        assert_eq!(
+            config.wsl.path.as_deref(),
+            Some("/home/susu/.nvm/versions/node/v22.20.0/bin:/home/susu/.cargo/bin:/usr/local/bin:/usr/bin:/bin")
         );
     }
 
@@ -303,6 +362,41 @@ mod tests {
             parse_native_host_config(&value.to_string()),
             Err(NativeHostConfigError::InvalidLinuxPath("wsl_daemon_binary"))
         ));
+
+        value = serde_json::from_str(&valid_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/.cargo/bin:relative");
+        assert!(matches!(
+            parse_native_host_config(&value.to_string()),
+            Err(NativeHostConfigError::InvalidLinuxPath("wsl_path"))
+        ));
+
+        value = serde_json::from_str(&valid_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/.cargo/bin:");
+        assert!(matches!(
+            parse_native_host_config(&value.to_string()),
+            Err(NativeHostConfigError::InvalidLinuxPath("wsl_path"))
+        ));
+
+        value = serde_json::from_str(&valid_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/../bin");
+        assert!(matches!(
+            parse_native_host_config(&value.to_string()),
+            Err(NativeHostConfigError::InvalidLinuxPath("wsl_path"))
+        ));
+    }
+
+    #[test]
+    fn config_parser_accepts_legacy_v1_config_with_wsl_path() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_v1_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/.cargo/bin:/usr/bin:/bin");
+
+        let config = parse_native_host_config(&value.to_string()).expect("config parses");
+
+        assert_eq!(
+            config.wsl.path.as_deref(),
+            Some("/home/susu/.cargo/bin:/usr/bin:/bin")
+        );
     }
 
     #[test]
@@ -385,6 +479,29 @@ mod tests {
                 "--cd",
                 "/home/susu/screen sidekick",
                 "--exec",
+                "/home/susu/screen sidekick/target/debug/screen-sidekick-daemon",
+                "--stdio-status"
+            ]
+        );
+    }
+
+    #[test]
+    fn wsl_command_builder_can_apply_explicit_path_without_shell_concatenation() {
+        let config = parse_native_host_config(&valid_config_with_path()).expect("config parses");
+
+        let command = build_wsl_daemon_command(&config.wsl);
+
+        assert_eq!(command.program, "wsl.exe");
+        assert_eq!(
+            command.args,
+            vec![
+                "-d",
+                "Ubuntu-24.04",
+                "--cd",
+                "/home/susu/screen sidekick",
+                "--exec",
+                "env",
+                "PATH=/home/susu/.nvm/versions/node/v22.20.0/bin:/home/susu/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
                 "/home/susu/screen sidekick/target/debug/screen-sidekick-daemon",
                 "--stdio-status"
             ]

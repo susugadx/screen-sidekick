@@ -25,6 +25,7 @@ pub const SCREEN_SIDEKICK_DAEMON_TOKEN_ENV: &str = "SCREEN_SIDEKICK_DAEMON_TOKEN
 pub const SCREEN_SIDEKICK_NATIVE_HOST_CONFIG_ENV: &str =
     config::SCREEN_SIDEKICK_NATIVE_HOST_CONFIG_ENV;
 pub const NATIVE_HOST_CONFIG_SCHEMA_VERSION: &str = config::NATIVE_HOST_CONFIG_SCHEMA_VERSION;
+pub const PRINT_CONFIG_SCHEMA_VERSION_ARG: &str = "--print-config-schema-version";
 pub const MAX_NATIVE_INCOMING_MESSAGE_BYTES: usize =
     screen_sidekick_sidekick_daemon::MAX_WS_MESSAGE_BYTES;
 pub const MAX_NATIVE_OUTGOING_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -34,6 +35,12 @@ const SETUP_REQUIRED_USER_ACTION: &str =
 
 #[cfg(test)]
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeHostCliCommand {
+    PrintConfigSchemaVersion,
+    Run { caller_origin: Option<String> },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeFrameError {
@@ -370,6 +377,23 @@ where
     args.into_iter()
         .skip(1)
         .find(|arg| arg.starts_with("chrome-extension://"))
+}
+
+pub fn cli_command_from_args<I>(args: I) -> NativeHostCliCommand
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    if args
+        .iter()
+        .skip(1)
+        .any(|arg| arg == PRINT_CONFIG_SCHEMA_VERSION_ARG)
+    {
+        return NativeHostCliCommand::PrintConfigSchemaVersion;
+    }
+    NativeHostCliCommand::Run {
+        caller_origin: caller_origin_from_args(args),
+    }
 }
 
 pub(crate) async fn write_frame_error<W: AsyncWrite + Unpin>(
