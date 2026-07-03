@@ -49,6 +49,31 @@ test("target platform is rejected for install", () => {
   assert.match(result.stderr, /--target-platform is not supported for install/);
 });
 
+test("install dry-run can include an explicit WSL PATH in generated config", () => {
+  const wslPath = "/home/susu/.nvm/versions/node/v22.20.0/bin:/home/susu/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
+  const result = runNativeHostDev([
+    "install",
+    "--browser",
+    "edge",
+    "--extension-id",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "--host-path",
+    "C:\\Sidekick\\screen-sidekick-native-host.exe",
+    "--wsl-distro",
+    "Ubuntu-24.04",
+    "--wsl-workdir",
+    "/home/susu/screen-sidekick",
+    "--wsl-daemon-binary",
+    "/home/susu/screen-sidekick/target/debug/screen-sidekick-daemon",
+    "--wsl-path",
+    wslPath,
+    "--dry-run",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /"wsl_path": "\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin"/);
+});
+
 test("uninstall dry-run can preview a non-current target platform", () => {
   const targetPlatform = nonCurrentTargetPlatform();
   const result = runNativeHostDev([

@@ -39,6 +39,17 @@ export function linuxPathError(value, option, allowRoot) {
     : null;
 }
 
+export function linuxPathListError(value, option) {
+  if (value.trim() !== value || value.length === 0 || value.includes("\\") || /[\x00-\x1f\x7f]/.test(value)) {
+    return `${option} must be a colon-separated list of absolute Linux paths without parent traversal`;
+  }
+  const parts = value.split(":");
+  if (parts.length === 0 || parts.some((part) => part.length === 0 || linuxPathError(part, option, false))) {
+    return `${option} must be a colon-separated list of absolute Linux paths without parent traversal`;
+  }
+  return null;
+}
+
 export function validateWslAutoConfigValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, error: "config must be a JSON object" };
@@ -50,6 +61,7 @@ export function validateWslAutoConfigValue(value) {
     "wsl_distro",
     "wsl_workdir",
     "wsl_daemon_binary",
+    "wsl_path",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowedFields.has(key)) {
@@ -88,6 +100,17 @@ export function validateWslAutoConfigValue(value) {
   if (daemonBinaryError) {
     return { ok: false, error: `config ${daemonBinaryError}` };
   }
+  let wslPath = null;
+  if (value.wsl_path !== undefined) {
+    if (typeof value.wsl_path !== "string" || value.wsl_path.trim().length === 0) {
+      return { ok: false, error: "config wsl_path is invalid" };
+    }
+    const wslPathError = linuxPathListError(value.wsl_path, "wsl_path");
+    if (wslPathError) {
+      return { ok: false, error: `config ${wslPathError}` };
+    }
+    wslPath = value.wsl_path;
+  }
 
   return {
     ok: true,
@@ -95,6 +118,7 @@ export function validateWslAutoConfigValue(value) {
       wslDistro: distro.value,
       wslWorkdir: workdir.value,
       wslDaemonBinary: daemonBinary.value,
+      wslPath,
     },
   };
 }

@@ -13,6 +13,7 @@ import {
   isWindowsAbsolutePath,
   joinWindowsPath,
   linuxPathError,
+  linuxPathListError,
   validateDaemonStatusOutput,
   validateWslAutoConfigValue,
   windowsRegistryKey,
@@ -24,6 +25,7 @@ const WINDOWS_HOST_PATH_ENV = "SCREEN_SIDEKICK_WINDOWS_HOST_PATH";
 const WSL_DISTRO_ENV = "SCREEN_SIDEKICK_WSL_DISTRO";
 const WSL_WORKDIR_ENV = "SCREEN_SIDEKICK_WSL_WORKDIR";
 const WSL_DAEMON_BINARY_ENV = "SCREEN_SIDEKICK_WSL_DAEMON_BINARY";
+const WSL_PATH_ENV = "SCREEN_SIDEKICK_WSL_PATH";
 const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -105,6 +107,7 @@ function installLocal(options, runtime) {
     config.wslWorkdir,
     "--wsl-daemon-binary",
     config.wslDaemonBinary,
+    ...(config.wslPath ? ["--wsl-path", config.wslPath] : []),
     ...(options.dryRun ? ["--dry-run"] : []),
   ], runtime);
 }
@@ -128,6 +131,11 @@ function doctorLocal(options, runtime) {
     checks.push(ok("WSL daemon binary comparison", config.expectedWslDaemonBinary));
   } else {
     checks.push(skip("WSL daemon binary comparison", `set --wsl-daemon-binary or ${WSL_DAEMON_BINARY_ENV}`));
+  }
+  if (config.expectedWslPath) {
+    checks.push(ok("WSL PATH comparison", config.expectedWslPath));
+  } else {
+    checks.push(skip("WSL PATH comparison", `set --wsl-path or ${WSL_PATH_ENV}`));
   }
   if (config.extensionId) {
     checks.push(ok("extension ID comparison", config.extensionId));
@@ -206,30 +214,27 @@ function runLocalBuilds(config, dryRun, runtime) {
       "build WSL daemon",
       [
         "wsl.exe",
-        "-d",
-        config.wslDistro,
-        "--cd",
-        config.wslWorkdir,
-        "--",
-        "cargo",
-        "build",
-        "-p",
-        "screen-sidekick-sidekick-daemon",
-        "--bin",
-        "screen-sidekick-daemon",
+        ...wslBuildArgs(config, [
+          "cargo",
+          "build",
+          "-p",
+          "screen-sidekick-sidekick-daemon",
+          "--bin",
+          "screen-sidekick-daemon",
+        ]),
       ],
       dryRun,
       runtime,
     );
     runRequired(
       "install extension dependencies in WSL",
-      ["wsl.exe", "-d", config.wslDistro, "--cd", config.wslWorkdir, "--", "npm", "ci", "--prefix", "apps/extension"],
+      ["wsl.exe", ...wslBuildArgs(config, ["npm", "ci", "--prefix", "apps/extension"])],
       dryRun,
       runtime,
     );
     runRequired(
       "build extension in WSL",
-      ["wsl.exe", "-d", config.wslDistro, "--cd", config.wslWorkdir, "--", "npm", "--prefix", "apps/extension", "run", "build"],
+      ["wsl.exe", ...wslBuildArgs(config, ["npm", "--prefix", "apps/extension", "run", "build"])],
       dryRun,
       runtime,
     );
@@ -285,6 +290,11 @@ function resolveInstallConfig(options, runtime) {
     joinLinuxPath(wslWorkdir, "target", "debug", "screen-sidekick-daemon");
   validateLinuxPath(wslDaemonBinary, "--wsl-daemon-binary", false);
 
+  const wslPath = options.wslPath ?? runtime.env[WSL_PATH_ENV] ?? null;
+  if (wslPath) {
+    validateLinuxPathList(wslPath, "--wsl-path");
+  }
+
   return {
     browser,
     extensionId,
@@ -292,6 +302,7 @@ function resolveInstallConfig(options, runtime) {
     wslDistro,
     wslWorkdir,
     wslDaemonBinary,
+    wslPath,
   };
 }
 
@@ -319,6 +330,10 @@ function resolveDoctorConfig(options, runtime) {
   if (expectedWslDaemonBinary) {
     validateLinuxPath(expectedWslDaemonBinary, "--wsl-daemon-binary", false);
   }
+  const expectedWslPath = options.wslPath ?? runtime.env[WSL_PATH_ENV] ?? null;
+  if (expectedWslPath) {
+    validateLinuxPathList(expectedWslPath, "--wsl-path");
+  }
 
   const defaultWslWorkdir = repoRoot.startsWith("/") ? repoRoot : null;
   const localWorkdir = expectedWslWorkdir ?? defaultWslWorkdir;
@@ -333,6 +348,7 @@ function resolveDoctorConfig(options, runtime) {
     expectedWslDistro,
     expectedWslWorkdir,
     expectedWslDaemonBinary,
+    expectedWslPath,
     localWorkdir,
     localDaemonBinary,
   };
@@ -421,7 +437,7 @@ function checkWindowsConfig(config, runtime) {
 }
 
 function checkWslCodex(config, runtime) {
-  const result = runCapture("wsl.exe", ["-d", config.wslDistro, "--", "codex", "--version"], {
+  const result = runCapture("wsl.exe", wslCodexArgs(config), {
     timeoutMs: 10_000,
   }, runtime);
   if (result.status !== 0) {
@@ -462,7 +478,22 @@ function checkWslDaemonStatus(config, runtime) {
 }
 
 function wslExecArgs(config, command) {
-  return ["-d", config.wslDistro, "--cd", config.wslWorkdir, "--exec", ...command];
+  const commandArgs = config.wslPath ? ["env", `PATH=${config.wslPath}`, ...command] : command;
+  return ["-d", config.wslDistro, "--cd", config.wslWorkdir, "--exec", ...commandArgs];
+}
+
+function wslBuildArgs(config, command) {
+  if (config.wslPath) {
+    return wslExecArgs(config, command);
+  }
+  return ["-d", config.wslDistro, "--cd", config.wslWorkdir, "--", ...command];
+}
+
+function wslCodexArgs(config) {
+  if (config.wslPath) {
+    return wslExecArgs(config, ["codex", "--version"]);
+  }
+  return ["-d", config.wslDistro, "--", "codex", "--version"];
 }
 
 function checkLocalDaemonStatus(config, runtime) {
@@ -491,6 +522,9 @@ function compareExpectedWslConfig(actual, expected) {
   }
   if (expected.expectedWslDaemonBinary && expected.expectedWslDaemonBinary !== actual.wslDaemonBinary) {
     mismatches.push("wsl_daemon_binary");
+  }
+  if (expected.expectedWslPath && expected.expectedWslPath !== actual.wslPath) {
+    mismatches.push("wsl_path");
   }
   if (mismatches.length > 0) {
     return `config does not match expected WSL settings: ${mismatches.join(", ")}`;
@@ -678,6 +712,9 @@ function parseArgs(args) {
       case "--wsl-daemon-binary":
         options.wslDaemonBinary = takeValue(args, ++index, arg);
         break;
+      case "--wsl-path":
+        options.wslPath = takeValue(args, ++index, arg);
+        break;
       case "--dry-run":
         options.dryRun = true;
         break;
@@ -716,6 +753,13 @@ function validateLinuxPath(value, option, allowRoot) {
   }
 }
 
+function validateLinuxPathList(value, option) {
+  const error = linuxPathListError(value, option);
+  if (error) {
+    usage(error);
+  }
+}
+
 function joinLinuxPath(...parts) {
   return parts
     .join("/")
@@ -744,12 +788,12 @@ function printUsage(runtime, error) {
     runtime.stderr(error);
   }
   runtime.stderr(`Usage:
-  node scripts/sidekick-local-setup.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> --host-path <windows-exe> [--wsl-distro <name>] [--wsl-workdir <path>] [--wsl-daemon-binary <path>] [--skip-build] [--dry-run]
-  node scripts/sidekick-local-setup.mjs doctor --browser <chrome|chrome-for-testing|chromium|edge> [--extension-id <32-char-id>] [--host-path <windows-exe>] [--wsl-distro <name>] [--wsl-workdir <path>] [--wsl-daemon-binary <path>] [--dry-run]
+  node scripts/sidekick-local-setup.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> --host-path <windows-exe> [--wsl-distro <name>] [--wsl-workdir <path>] [--wsl-daemon-binary <path>] [--wsl-path <path-list>] [--skip-build] [--dry-run]
+  node scripts/sidekick-local-setup.mjs doctor --browser <chrome|chrome-for-testing|chromium|edge> [--extension-id <32-char-id>] [--host-path <windows-exe>] [--wsl-distro <name>] [--wsl-workdir <path>] [--wsl-daemon-binary <path>] [--wsl-path <path-list>] [--dry-run]
   node scripts/sidekick-local-setup.mjs uninstall --browser <chrome|chrome-for-testing|chromium|edge> [--keep-config] [--dry-run]
 
 Environment defaults:
-  ${EXTENSION_ID_ENV}, ${WINDOWS_HOST_PATH_ENV}, ${WSL_DISTRO_ENV}, ${WSL_WORKDIR_ENV}, ${WSL_DAEMON_BINARY_ENV}`);
+  ${EXTENSION_ID_ENV}, ${WINDOWS_HOST_PATH_ENV}, ${WSL_DISTRO_ENV}, ${WSL_WORKDIR_ENV}, ${WSL_DAEMON_BINARY_ENV}, ${WSL_PATH_ENV}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

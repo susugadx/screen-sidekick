@@ -15,6 +15,7 @@ import {
   isWindowsAbsolutePath,
   joinWindowsPath,
   linuxPathError,
+  linuxPathListError,
   windowsRegistryKey,
   wslDistroError,
 } from "./native-host-shared.mjs";
@@ -119,7 +120,7 @@ function buildManifest(hostPath, extensionId) {
 }
 
 function buildWslConfig(options) {
-  const hasAny = Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary);
+  const hasAny = Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary || options.wslPath);
   if (!hasAny) {
     return null;
   }
@@ -129,13 +130,20 @@ function buildWslConfig(options) {
   validateWslDistro(distro);
   validateLinuxPath(workdir, "--wsl-workdir", true);
   validateLinuxPath(daemonBinary, "--wsl-daemon-binary", false);
-  return {
+  if (options.wslPath) {
+    validateLinuxPathList(options.wslPath, "--wsl-path");
+  }
+  const config = {
     schema_version: CONFIG_SCHEMA_VERSION,
     mode: "wsl_auto",
     wsl_distro: distro,
     wsl_workdir: workdir,
     wsl_daemon_binary: daemonBinary,
   };
+  if (options.wslPath) {
+    config.wsl_path = options.wslPath;
+  }
+  return config;
 }
 
 function writeJsonFile(filePath, value, dryRun) {
@@ -247,7 +255,7 @@ function targetPlatformForOptions(options) {
 }
 
 function hasWslConfigOptions(options) {
-  return Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary);
+  return Boolean(options.wslDistro || options.wslWorkdir || options.wslDaemonBinary || options.wslPath);
 }
 
 function ensureTargetCanBeWritten(targetPlatform, dryRun, command) {
@@ -353,6 +361,9 @@ function parseArgs(args) {
       case "--wsl-daemon-binary":
         options.wslDaemonBinary = takeValue(args, ++index, arg);
         break;
+      case "--wsl-path":
+        options.wslPath = takeValue(args, ++index, arg);
+        break;
       case "--out":
         options.out = takeValue(args, ++index, arg);
         break;
@@ -398,13 +409,20 @@ function validateLinuxPath(value, option, allowRoot) {
   }
 }
 
+function validateLinuxPathList(value, option) {
+  const error = linuxPathListError(value, option);
+  if (error) {
+    usage(error);
+  }
+}
+
 function usage(error) {
   if (error) {
     console.error(error);
   }
   console.error(`Usage:
-  node scripts/native-host-dev.mjs generate --extension-id <32-char-id> [--host-path <path>] [--out <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
-  node scripts/native-host-dev.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> [--host-path <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--dry-run]
+  node scripts/native-host-dev.mjs generate --extension-id <32-char-id> [--host-path <path>] [--out <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--wsl-path <path-list>] [--dry-run]
+  node scripts/native-host-dev.mjs install --browser <chrome|chrome-for-testing|chromium|edge> --extension-id <32-char-id> [--host-path <path>] [--wsl-distro <name> --wsl-workdir <path> --wsl-daemon-binary <path>] [--wsl-path <path-list>] [--dry-run]
   node scripts/native-host-dev.mjs uninstall --browser <chrome|chrome-for-testing|chromium|edge> [--target-platform <win32|linux|darwin>] [--dry-run]
   node scripts/native-host-dev.mjs locations [--browser <chrome|chrome-for-testing|chromium|edge>] [--target-platform <win32|linux|darwin>]`);
   process.exit(2);

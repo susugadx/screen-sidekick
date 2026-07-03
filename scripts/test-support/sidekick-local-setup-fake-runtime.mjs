@@ -255,6 +255,10 @@ function fakeNativeHostDevSpawn(command, commandArgs, fixture) {
       wsl_workdir: optionValue(args, "--wsl-workdir"),
       wsl_daemon_binary: optionValue(args, "--wsl-daemon-binary"),
     };
+    const wslPath = optionValue(args, "--wsl-path");
+    if (wslPath) {
+      wslConfig.wsl_path = wslPath;
+    }
     fixture.stdout.push(`Would write ${fixture.manifestPath}:`);
     fixture.stdout.push(JSON.stringify({
       name: HOST_NAME,
@@ -302,6 +306,19 @@ function optionValue(args, option) {
 
 function isWslExec(commandArgs, expectedCommand) {
   const execIndex = commandArgs.indexOf("--exec");
+  const actualCommand = execIndex === -1 ? [] : stripWslEnvPrefix(commandArgs.slice(execIndex + 1));
   return execIndex !== -1 &&
-    JSON.stringify(commandArgs.slice(execIndex + 1)) === JSON.stringify(expectedCommand);
+    JSON.stringify(actualCommand) === JSON.stringify(expectedCommand);
+}
+
+function stripWslEnvPrefix(commandArgs) {
+  if (
+    commandArgs.length >= 3 &&
+    commandArgs[0] === "env" &&
+    typeof commandArgs[1] === "string" &&
+    commandArgs[1].startsWith("PATH=")
+  ) {
+    return commandArgs.slice(2);
+  }
+  return commandArgs;
 }

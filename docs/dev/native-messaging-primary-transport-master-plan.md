@@ -299,7 +299,7 @@ Smoke path:
 5. Copy the unpacked extension ID from chrome://extensions or edge://extensions.
 
 6. Install dev Native Messaging host manifest and WSL config for that exact ID:
-   node scripts/native-host-dev.mjs install --browser chrome --extension-id <id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon>
+   node scripts/native-host-dev.mjs install --browser chrome --extension-id <id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --wsl-path <path-list>
 
 7. Open the side panel without opening the desktop window or WSL Chrome.
 
@@ -355,6 +355,9 @@ product center itself:
 - Root `npm run sidekick:install-local` builds the WSL daemon and extension,
   then delegates browser manifest / registry / WSL config writes to
   `scripts/native-host-dev.mjs`.
+- Local setup can write an explicit `wsl_path` for Windows-launched
+  non-interactive WSL commands, so build, doctor, and native-host startup do not
+  rely on interactive shell init files to find Cargo, npm, or Codex.
 - The Windows native host exe is still provided explicitly by `--host-path` or
   `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`; cross-building/copying that exe is not
   part of the first setup command.
@@ -513,7 +516,7 @@ cargo test -p screen-sidekick-sidekick-daemon
 cargo clippy -p screen-sidekick-native-host -p screen-sidekick-sidekick-daemon --all-targets -- -D warnings
 npm --prefix apps/extension test
 node apps/extension/check-manifest.mjs
-node scripts/native-host-dev.mjs install --browser chrome --extension-id <32-char-id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --dry-run
+node scripts/native-host-dev.mjs install --browser chrome --extension-id <32-char-id> --host-path <Windows exe> --wsl-distro <distro> --wsl-workdir <repo> --wsl-daemon-binary <daemon> --wsl-path <path-list> --dry-run
 git diff --check
 ```
 

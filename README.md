@@ -98,7 +98,8 @@ npm run sidekick:install-local -- \
   --browser edge \
   --extension-id <32-character-extension-id> \
   --host-path 'C:\path\to\screen-sidekick-native-host.exe' \
-  --wsl-workdir /home/<user>/dev/projects/screen-sidekick
+  --wsl-workdir /home/<user>/dev/projects/screen-sidekick \
+  --wsl-path /home/<user>/.nvm/versions/node/<version>/bin:/home/<user>/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 
 npm run sidekick:doctor-local -- --browser edge --extension-id <32-character-extension-id>
 npm run sidekick:uninstall-local -- --browser edge
@@ -107,7 +108,10 @@ npm run sidekick:uninstall-local -- --browser edge
 The commands also accept environment defaults:
 `SCREEN_SIDEKICK_EXTENSION_ID`, `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`,
 `SCREEN_SIDEKICK_WSL_DISTRO`, `SCREEN_SIDEKICK_WSL_WORKDIR`, and
-`SCREEN_SIDEKICK_WSL_DAEMON_BINARY`. If `--wsl-workdir` is omitted, set
+`SCREEN_SIDEKICK_WSL_DAEMON_BINARY`, and `SCREEN_SIDEKICK_WSL_PATH`. The WSL
+PATH value is a colon-separated list of absolute WSL paths used for
+Windows-launched non-interactive WSL commands, including build, doctor, and
+native-host daemon startup. If `--wsl-workdir` is omitted, set
 `SCREEN_SIDEKICK_WSL_WORKDIR` first. From WSL/Linux, use `--dry-run` for the
 Windows registry/config step; actual HKCU/APPDATA writes must run from Windows.
 

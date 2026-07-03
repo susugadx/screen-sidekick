@@ -17,8 +17,11 @@ const cleanEnvKeys = [
   "SCREEN_SIDEKICK_WSL_DISTRO",
   "SCREEN_SIDEKICK_WSL_WORKDIR",
   "SCREEN_SIDEKICK_WSL_DAEMON_BINARY",
+  "SCREEN_SIDEKICK_WSL_PATH",
   "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG",
 ];
+
+const wslPath = "/home/susu/.nvm/versions/node/v22.20.0/bin:/home/susu/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
 
 test("install dry-run delegates Windows WSL manifest and config generation", () => {
   const result = runSetupWithFakeWindows([
@@ -35,6 +38,8 @@ test("install dry-run delegates Windows WSL manifest and config generation", () 
     "/home/test/screen-sidekick",
     "--wsl-daemon-binary",
     "/home/test/screen-sidekick/target/debug/screen-sidekick-daemon",
+    "--wsl-path",
+    wslPath,
     "--skip-build",
     "--dry-run",
   ]);
@@ -43,6 +48,7 @@ test("install dry-run delegates Windows WSL manifest and config generation", () 
   assert.match(result.stdout, /Would write .*com\.screen_sidekick\.host\.json/);
   assert.match(result.stdout, /chrome-extension:\/\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\//);
   assert.match(result.stdout, /"wsl_distro": "Ubuntu"/);
+  assert.match(result.stdout, /"wsl_path": "\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin"/);
   assert.match(result.stdout, /Would run: reg add HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com\.screen_sidekick\.host/);
 });
 
@@ -97,6 +103,39 @@ test("Windows install dry-run shows WSL build steps without executing them", () 
     /Would run \(build extension in WSL\): wsl\.exe -d Ubuntu-24\.04 --cd \/home\/test\/screen-sidekick -- npm --prefix apps\/extension run build/,
   );
   assert.equal(result.calls.some((call) => call.command === "cargo" || call.command === "npm"), false);
+});
+
+test("Windows install dry-run applies explicit WSL PATH to WSL build steps", () => {
+  const result = runSetupWithFakeWindows([
+    "install",
+    "--browser",
+    "edge",
+    "--extension-id",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "--host-path",
+    "C:\\Sidekick\\screen-sidekick-native-host.exe",
+    "--wsl-distro",
+    "Ubuntu-24.04",
+    "--wsl-workdir",
+    "/home/test/screen-sidekick",
+    "--wsl-path",
+    wslPath,
+    "--dry-run",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /Would run \(build WSL daemon\): wsl\.exe -d Ubuntu-24\.04 --cd \/home\/test\/screen-sidekick --exec env PATH=\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin cargo build -p screen-sidekick-sidekick-daemon --bin screen-sidekick-daemon/,
+  );
+  assert.match(
+    result.stdout,
+    /Would run \(install extension dependencies in WSL\): wsl\.exe -d Ubuntu-24\.04 --cd \/home\/test\/screen-sidekick --exec env PATH=\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin npm ci --prefix apps\/extension/,
+  );
+  assert.match(
+    result.stdout,
+    /Would run \(build extension in WSL\): wsl\.exe -d Ubuntu-24\.04 --cd \/home\/test\/screen-sidekick --exec env PATH=\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin npm --prefix apps\/extension run build/,
+  );
 });
 
 test("doctor dry-run validates config without process checks", () => {
@@ -155,6 +194,26 @@ test("invalid WSL path is rejected before subprocess execution", () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /--wsl-workdir must be an absolute Linux path without parent traversal/);
+});
+
+test("invalid WSL PATH list is rejected before subprocess execution", () => {
+  const result = runSetup([
+    "install",
+    "--browser",
+    "edge",
+    "--extension-id",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "--host-path",
+    "C:\\Sidekick\\screen-sidekick-native-host.exe",
+    "--wsl-workdir",
+    "/home/test/screen-sidekick",
+    "--wsl-path",
+    "/home/test/.cargo/bin:relative/bin",
+    "--dry-run",
+  ]);
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--wsl-path must be a colon-separated list of absolute Linux paths without parent traversal/);
 });
 
 test("Windows doctor reads installed config without requiring WSL path options", () => {
@@ -320,6 +379,11 @@ test("Windows doctor mirrors native-host config parser failures", () => {
       config: validNativeHostConfig({ wsl_workdir: "relative/path" }),
       expected: /config wsl_workdir must be an absolute Linux path without parent traversal/,
     },
+    {
+      name: "invalid WSL PATH",
+      config: validNativeHostConfig({ wsl_path: "/home/susu/.cargo/bin:" }),
+      expected: /config wsl_path must be a colon-separated list of absolute Linux paths without parent traversal/,
+    },
   ];
 
   for (const fixture of cases) {
@@ -357,6 +421,58 @@ test("Windows doctor passes config WSL values into codex and daemon checks", () 
       "--cd",
       "/home/susu/screen-sidekick",
       "--exec",
+      "/home/susu/screen-sidekick/target/debug/screen-sidekick-daemon",
+      "--stdio-status",
+    ],
+  ]);
+});
+
+test("Windows doctor applies config WSL PATH to codex and daemon checks", () => {
+  const result = runSetupWithFakeWindows([
+    "doctor",
+    "--browser",
+    "edge",
+    "--wsl-path",
+    wslPath,
+  ], {
+    config: validNativeHostConfig({ wsl_path: wslPath }),
+  });
+
+  assert.equal(result.status, 0, result.stdout);
+  const wslCalls = result.calls.filter((call) => call.command === "wsl.exe").map((call) => call.args);
+  assert.deepEqual(wslCalls, [
+    ["--status"],
+    [
+      "-d",
+      "Ubuntu-24.04",
+      "--cd",
+      "/home/susu/screen-sidekick",
+      "--exec",
+      "env",
+      `PATH=${wslPath}`,
+      "codex",
+      "--version",
+    ],
+    [
+      "-d",
+      "Ubuntu-24.04",
+      "--cd",
+      "/home/susu/screen-sidekick",
+      "--exec",
+      "env",
+      `PATH=${wslPath}`,
+      "test",
+      "-f",
+      "apps/extension/dist/side_panel.js",
+    ],
+    [
+      "-d",
+      "Ubuntu-24.04",
+      "--cd",
+      "/home/susu/screen-sidekick",
+      "--exec",
+      "env",
+      `PATH=${wslPath}`,
       "/home/susu/screen-sidekick/target/debug/screen-sidekick-daemon",
       "--stdio-status",
     ],
