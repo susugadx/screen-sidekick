@@ -186,13 +186,17 @@ The config path defaults to
 `SCREEN_SIDEKICK_NATIVE_HOST_CONFIG` if needed. The native host validates the
 config and starts WSL with argv, not a shell command string. `--wsl-path` is
 optional, but recommended for Windows-launched WSL commands when `cargo`,
-`npm`, or `codex` live under user-managed paths such as Cargo or nvm. If the
-sidecar env vars below are not set and the Windows config is missing or
-invalid, WSL startup/status reporting fails, or the host cannot connect to the
-reported WSL daemon WebSocket before the first daemon response, the host answers
-the first Native Messaging request with a structured setup-required error
-instead of falling back to an in-process Windows runtime or silent WebSocket
-fallback.
+`npm`, or `codex` live under user-managed paths such as Cargo or nvm. It writes
+native-host config schema v0.2, so setup checks that the configured
+`--host-path` executable reports v0.2 support before writing the config. Rebuild
+the Windows native host exe after updating this repository. The host and doctor
+still read legacy v0.1 configs with `wsl_path` written by earlier local setup
+builds. If the sidecar env vars below are not set and the Windows config is
+missing or invalid, WSL startup/status reporting fails, or the host cannot
+connect to the reported WSL daemon WebSocket before the first daemon response,
+the host answers the first Native Messaging request with a structured
+setup-required error instead of falling back to an in-process Windows runtime or
+silent WebSocket fallback.
 Each WSL auto-start daemon is tied to the native port that launched it, so it
 does not run global interrupted-turn recovery on startup. A turn started by that
 sidecar-owned WebSocket relay is still failed and cleared if that relay closes
@@ -253,4 +257,7 @@ Windows. If the install command omits `--wsl-workdir`, set
 options without spawning process checks. `SCREEN_SIDEKICK_WSL_PATH` uses the
 same colon-separated absolute WSL path list as `--wsl-path`; include the active
 nvm bin directory, Cargo bin directory, and system bin directories needed by the
-daemon and Codex CLI.
+daemon and Codex CLI. If this value is set, `install-local` verifies that the
+configured Windows native host exe can read the v0.2 config. `doctor-local`
+also verifies the registered host exe for installed v0.2 configs and legacy
+v0.1 configs with `wsl_path`.

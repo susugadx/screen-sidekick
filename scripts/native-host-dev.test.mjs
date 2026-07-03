@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { CONFIG_SCHEMA_VERSION } from "./native-host-shared.mjs";
 
 const scriptPath = fileURLToPath(new URL("./native-host-dev.mjs", import.meta.url));
 
@@ -71,6 +72,7 @@ test("install dry-run can include an explicit WSL PATH in generated config", () 
   ]);
 
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`"schema_version": "${CONFIG_SCHEMA_VERSION}"`));
   assert.match(result.stdout, /"wsl_path": "\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin"/);
 });
 

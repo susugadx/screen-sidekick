@@ -5,11 +5,14 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  CONFIG_SCHEMA_VERSION,
   CONFIG_ENV,
   DESCRIPTION,
   HOST_NAME,
+  PRINT_CONFIG_SCHEMA_VERSION_ARG,
   browserError,
   extensionIdError,
+  hostSchemaProbeEnv,
   isWindowsAbsolutePath,
   joinWindowsPath,
   linuxPathError,
@@ -156,10 +159,14 @@ function doctorLocal(options, runtime) {
 
   if (runtime.platform() === "win32") {
     checks.push(checkCommandAvailable("wsl.exe", ["--status"], runtime));
-    checks.push(checkWindowsRegistryManifest(config, runtime));
+    const manifestResult = checkWindowsRegistryManifest(config, runtime);
+    checks.push(manifestResult.check);
     const configResult = checkWindowsConfig(config, runtime);
     checks.push(configResult.check);
     if (configResult.wslConfig) {
+      if (requiresWindowsHostConfigSchemaProbe(configResult.wslConfig)) {
+        checks.push(checkWindowsHostConfigSchema(manifestResult.hostPath, CONFIG_SCHEMA_VERSION, runtime));
+      }
       checks.push(checkWslCodex(configResult.wslConfig, runtime));
       checks.push(checkWslExtensionBuildOutput(configResult.wslConfig, runtime));
       checks.push(checkWslDaemonStatus(configResult.wslConfig, runtime));
@@ -364,49 +371,49 @@ function checkWindowsRegistryManifest(config, runtime) {
   const location = windowsRegistryKey(config.browser);
   const query = runCapture("reg", ["query", location, "/ve"], { timeoutMs: 10_000 }, runtime);
   if (query.status !== 0) {
-    return fail("Windows registry manifest", "native host registry entry is missing");
+    return { check: fail("Windows registry manifest", "native host registry entry is missing") };
   }
   const manifestPath = parseRegDefaultValue(query.stdout);
   if (!manifestPath) {
-    return fail("Windows registry manifest", "registry entry did not contain a default REG_SZ path");
+    return { check: fail("Windows registry manifest", "registry entry did not contain a default REG_SZ path") };
   }
   if (!isWindowsAbsolutePath(manifestPath)) {
-    return fail("Windows registry manifest", `registry manifest path is not absolute: ${manifestPath}`);
+    return { check: fail("Windows registry manifest", `registry manifest path is not absolute: ${manifestPath}`) };
   }
   if (!runtime.existsSync(manifestPath)) {
-    return fail("Windows registry manifest", `manifest does not exist: ${manifestPath}`);
+    return { check: fail("Windows registry manifest", `manifest does not exist: ${manifestPath}`) };
   }
   const manifest = readJson(manifestPath, runtime);
   if (!manifest.ok) {
-    return fail("Windows registry manifest", manifest.error);
+    return { check: fail("Windows registry manifest", manifest.error) };
   }
   if (
     manifest.value.name !== HOST_NAME ||
     manifest.value.description !== DESCRIPTION ||
     manifest.value.type !== "stdio"
   ) {
-    return fail("Windows registry manifest", "manifest name/type/description is invalid");
+    return { check: fail("Windows registry manifest", "manifest name/type/description is invalid") };
   }
   const hostPath = manifest.value.path;
   if (typeof hostPath !== "string") {
-    return fail("Windows registry manifest", "manifest path is missing or not a string");
+    return { check: fail("Windows registry manifest", "manifest path is missing or not a string") };
   }
   if (!isWindowsAbsolutePath(hostPath)) {
-    return fail("Windows registry manifest", `manifest path is not an absolute Windows path: ${hostPath}`);
+    return { check: fail("Windows registry manifest", `manifest path is not an absolute Windows path: ${hostPath}`) };
   }
   if (!runtime.existsSync(hostPath)) {
-    return fail("Windows registry manifest", `manifest path does not exist: ${hostPath}`);
+    return { check: fail("Windows registry manifest", `manifest path does not exist: ${hostPath}`) };
   }
   if (config.hostPath && !sameWindowsPath(hostPath, config.hostPath)) {
-    return fail("Windows registry manifest", `manifest path does not match expected host path: ${hostPath}`);
+    return { check: fail("Windows registry manifest", `manifest path does not match expected host path: ${hostPath}`) };
   }
   if (config.extensionId) {
     const expectedOrigin = `chrome-extension://${config.extensionId}/`;
     if (!allowedOriginsExactlyMatch(manifest.value.allowed_origins, expectedOrigin)) {
-      return fail("Windows registry manifest", `allowed_origins must exactly match ${expectedOrigin}`);
+      return { check: fail("Windows registry manifest", `allowed_origins must exactly match ${expectedOrigin}`) };
     }
   }
-  return ok("Windows registry manifest", manifestPath);
+  return { check: ok("Windows registry manifest", manifestPath), hostPath };
 }
 
 function allowedOriginsExactlyMatch(value, expectedOrigin) {
@@ -434,6 +441,28 @@ function checkWindowsConfig(config, runtime) {
     return { check: fail("Windows native host config", mismatch) };
   }
   return { check: ok("Windows native host config", configPath), wslConfig: validated.config };
+}
+
+function requiresWindowsHostConfigSchemaProbe(wslConfig) {
+  return wslConfig.schemaVersion === CONFIG_SCHEMA_VERSION || Boolean(wslConfig.wslPath);
+}
+
+function checkWindowsHostConfigSchema(hostPath, schemaVersion, runtime) {
+  if (!hostPath) {
+    return skip("Windows native host config schema compatibility", "registry manifest must be valid first");
+  }
+  const result = runCapture(hostPath, [PRINT_CONFIG_SCHEMA_VERSION_ARG], {
+    env: hostSchemaProbeEnv(runtime.env),
+    timeoutMs: 5_000,
+  }, runtime);
+  const observed = firstLine(result.stdout);
+  if (result.status !== 0 || observed !== schemaVersion) {
+    return fail(
+      "Windows native host config schema compatibility",
+      `host binary must report ${schemaVersion} before using this config`,
+    );
+  }
+  return ok("Windows native host config schema compatibility", observed);
 }
 
 function checkWslCodex(config, runtime) {
@@ -595,6 +624,7 @@ function runCapture(command, args, options = {}, runtime) {
     const result = runtime.spawnSync(command, args, {
       encoding: "utf8",
       input: options.input,
+      env: options.env,
       maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
       shell: false,
       timeout: options.timeoutMs ?? 10_000,

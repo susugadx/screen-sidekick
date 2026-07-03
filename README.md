@@ -111,7 +111,12 @@ The commands also accept environment defaults:
 `SCREEN_SIDEKICK_WSL_DAEMON_BINARY`, and `SCREEN_SIDEKICK_WSL_PATH`. The WSL
 PATH value is a colon-separated list of absolute WSL paths used for
 Windows-launched non-interactive WSL commands, including build, doctor, and
-native-host daemon startup. If `--wsl-workdir` is omitted, set
+native-host daemon startup. Because `--wsl-path` writes native-host config
+schema v0.2, setup verifies that the `--host-path` executable reports v0.2
+support; rebuild the Windows native host exe after updating this repository.
+Doctor also verifies the registered host exe for installed v0.2 configs and
+legacy v0.1 configs with `wsl_path`. The host still reads legacy v0.1 configs
+with `wsl_path` written by earlier local setup builds. If `--wsl-workdir` is omitted, set
 `SCREEN_SIDEKICK_WSL_WORKDIR` first. From WSL/Linux, use `--dry-run` for the
 Windows registry/config step; actual HKCU/APPDATA writes must run from Windows.
 

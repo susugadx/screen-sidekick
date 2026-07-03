@@ -8,10 +8,13 @@ import {
   BROWSERS,
   CONFIG_ENV,
   CONFIG_SCHEMA_VERSION,
+  CONFIG_SCHEMA_VERSION_V1,
   DESCRIPTION,
   HOST_NAME,
+  PRINT_CONFIG_SCHEMA_VERSION_ARG,
   browserError,
   extensionIdError,
+  hostSchemaProbeEnv,
   isWindowsAbsolutePath,
   joinWindowsPath,
   linuxPathError,
@@ -21,6 +24,8 @@ import {
 } from "./native-host-shared.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const HOST_SCHEMA_CHECK_TIMEOUT_MS = 5_000;
+const HOST_SCHEMA_CHECK_MAX_BYTES = 4 * 1024;
 
 function main(argv) {
   const [command, ...rest] = argv;
@@ -54,6 +59,7 @@ function generate(options) {
     ? resolve(options.out)
     : defaultGeneratedManifestPath();
   const manifest = buildManifest(hostPath, extensionId);
+  ensureHostSupportsConfig(hostPath, targetPlatform, wslConfig, options.dryRun);
   writeJsonFile(manifestPath, manifest, options.dryRun);
   if (wslConfig) {
     writeJsonFile(nativeHostConfigPath(targetPlatform, options.dryRun), wslConfig, options.dryRun);
@@ -73,6 +79,7 @@ function install(options) {
     ? resolve(options.manifestPath)
     : defaultGeneratedManifestPath();
   const manifest = buildManifest(hostPath, extensionId);
+  ensureHostSupportsConfig(hostPath, targetPlatform, wslConfig, options.dryRun);
   writeJsonFile(manifestPath, manifest, options.dryRun);
   if (wslConfig) {
     writeJsonFile(nativeHostConfigPath(targetPlatform, options.dryRun), wslConfig, options.dryRun);
@@ -134,7 +141,7 @@ function buildWslConfig(options) {
     validateLinuxPathList(options.wslPath, "--wsl-path");
   }
   const config = {
-    schema_version: CONFIG_SCHEMA_VERSION,
+    schema_version: options.wslPath ? CONFIG_SCHEMA_VERSION : CONFIG_SCHEMA_VERSION_V1,
     mode: "wsl_auto",
     wsl_distro: distro,
     wsl_workdir: workdir,
@@ -144,6 +151,29 @@ function buildWslConfig(options) {
     config.wsl_path = options.wslPath;
   }
   return config;
+}
+
+function ensureHostSupportsConfig(hostPath, targetPlatform, wslConfig, dryRun) {
+  if (dryRun || !wslConfig || wslConfig.schema_version !== CONFIG_SCHEMA_VERSION) {
+    return;
+  }
+  if (targetPlatform !== platform()) {
+    usage("--wsl-path requires verifying the native host binary on the target platform");
+  }
+  const result = spawnSync(hostPath, [PRINT_CONFIG_SCHEMA_VERSION_ARG], {
+    encoding: "utf8",
+    env: hostSchemaProbeEnv(process.env),
+    maxBuffer: HOST_SCHEMA_CHECK_MAX_BYTES,
+    shell: false,
+    timeout: HOST_SCHEMA_CHECK_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  if (result.status === 0 && result.stdout.trim() === CONFIG_SCHEMA_VERSION) {
+    return;
+  }
+  usage(
+    `--wsl-path requires a screen-sidekick-native-host binary that reports ${CONFIG_SCHEMA_VERSION}; rebuild or replace --host-path`,
+  );
 }
 
 function writeJsonFile(filePath, value, dryRun) {

@@ -1,8 +1,10 @@
 import {
   CONFIG_SCHEMA_VERSION,
+  CONFIG_SCHEMA_VERSION_V1,
   DAEMON_STATUS_SCHEMA_VERSION,
   DESCRIPTION,
   HOST_NAME,
+  PRINT_CONFIG_SCHEMA_VERSION_ARG,
   windowsRegistryKey,
 } from "../native-host-shared.mjs";
 import { runSidekickLocalSetup } from "../sidekick-local-setup.mjs";
@@ -55,6 +57,7 @@ export function runSetupWithFakeWindows(args, overrides = {}) {
         daemonStatusStdout,
         extensionBuildOutputExists,
         nativeHostDevStatus: overrides.nativeHostDevStatus ?? 0,
+        nativeHostConfigSchemaVersion: overrides.nativeHostConfigSchemaVersion ?? CONFIG_SCHEMA_VERSION,
         stdout,
         stderr,
       });
@@ -147,7 +150,7 @@ export function validManifest(overrides = {}) {
 
 export function validNativeHostConfig(overrides = {}) {
   return {
-    schema_version: CONFIG_SCHEMA_VERSION,
+    schema_version: overrides.wsl_path ? CONFIG_SCHEMA_VERSION : CONFIG_SCHEMA_VERSION_V1,
     mode: "wsl_auto",
     wsl_distro: "Ubuntu-24.04",
     wsl_workdir: "/home/susu/screen-sidekick",
@@ -191,6 +194,9 @@ function fakeWindowsSpawn(command, commandArgs, fixture) {
   }
   if (command === "wsl.exe" && commandArgs.length === 1 && commandArgs[0] === "--status") {
     return { status: 0, stdout: "Default Distribution: Ubuntu-24.04\n", stderr: "" };
+  }
+  if (command === "C:\\Sidekick\\screen-sidekick-native-host.exe" && commandArgs.length === 1 && commandArgs[0] === PRINT_CONFIG_SCHEMA_VERSION_ARG) {
+    return { status: 0, stdout: `${fixture.nativeHostConfigSchemaVersion}\n`, stderr: "" };
   }
   if (command === "wsl.exe" && commandArgs.includes("codex")) {
     return { status: 0, stdout: "codex 1.2.3\n", stderr: "" };
@@ -248,14 +254,14 @@ function fakeNativeHostDevSpawn(command, commandArgs, fixture) {
     const browser = optionValue(args, "--browser");
     const extensionId = optionValue(args, "--extension-id");
     const hostPath = optionValue(args, "--host-path");
+    const wslPath = optionValue(args, "--wsl-path");
     const wslConfig = {
-      schema_version: CONFIG_SCHEMA_VERSION,
+      schema_version: wslPath ? CONFIG_SCHEMA_VERSION : CONFIG_SCHEMA_VERSION_V1,
       mode: "wsl_auto",
       wsl_distro: optionValue(args, "--wsl-distro"),
       wsl_workdir: optionValue(args, "--wsl-workdir"),
       wsl_daemon_binary: optionValue(args, "--wsl-daemon-binary"),
     };
-    const wslPath = optionValue(args, "--wsl-path");
     if (wslPath) {
       wslConfig.wsl_path = wslPath;
     }
@@ -280,6 +286,14 @@ function fakeNativeHostDevSpawn(command, commandArgs, fixture) {
   }
 
   if (subcommand === "install" || subcommand === "uninstall") {
+    if (
+      subcommand === "install" &&
+      args.includes("--wsl-path") &&
+      fixture.nativeHostConfigSchemaVersion !== CONFIG_SCHEMA_VERSION
+    ) {
+      fixture.stderr.push(`--wsl-path requires a compatible native host binary`);
+      return { status: 2, stdout: "", stderr: "" };
+    }
     if (fixture.nativeHostDevStatus !== 0) {
       fixture.stderr.push(`native-host-dev ${subcommand} failed`);
     }

@@ -5,8 +5,10 @@ use std::{
 
 use serde::Deserialize;
 
-pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION: &str =
+pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1: &str =
     "screen_sidekick_native_host_config.v0.1";
+pub(crate) const NATIVE_HOST_CONFIG_SCHEMA_VERSION: &str =
+    "screen_sidekick_native_host_config.v0.2";
 pub(crate) const SCREEN_SIDEKICK_NATIVE_HOST_CONFIG_ENV: &str =
     "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG";
 
@@ -120,7 +122,9 @@ pub(crate) fn parse_native_host_config(
 ) -> Result<NativeHostConfig, NativeHostConfigError> {
     let file: NativeHostConfigFile =
         serde_json::from_str(text).map_err(NativeHostConfigError::Parse)?;
-    if file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION {
+    if file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION
+        && file.schema_version != NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1
+    {
         return Err(NativeHostConfigError::UnsupportedSchemaVersion);
     }
     if file.mode != "wsl_auto" {
@@ -275,6 +279,13 @@ mod tests {
         .to_string()
     }
 
+    fn valid_v1_config() -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_config()).expect("config json parses");
+        value["schema_version"] = json!(NATIVE_HOST_CONFIG_SCHEMA_VERSION_V1);
+        value.to_string()
+    }
+
     fn valid_config_with_path() -> String {
         let mut value: serde_json::Value =
             serde_json::from_str(&valid_config()).expect("config json parses");
@@ -292,6 +303,14 @@ mod tests {
             config.wsl.daemon_binary,
             "/home/susu/screen sidekick/target/debug/screen-sidekick-daemon"
         );
+        assert_eq!(config.wsl.path, None);
+    }
+
+    #[test]
+    fn config_parser_accepts_legacy_v1_config_without_wsl_path() {
+        let config = parse_native_host_config(&valid_v1_config()).expect("config parses");
+
+        assert_eq!(config.wsl.distro, "Ubuntu-24.04");
         assert_eq!(config.wsl.path, None);
     }
 
@@ -364,6 +383,20 @@ mod tests {
             parse_native_host_config(&value.to_string()),
             Err(NativeHostConfigError::InvalidLinuxPath("wsl_path"))
         ));
+    }
+
+    #[test]
+    fn config_parser_accepts_legacy_v1_config_with_wsl_path() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_v1_config()).expect("config json parses");
+        value["wsl_path"] = json!("/home/susu/.cargo/bin:/usr/bin:/bin");
+
+        let config = parse_native_host_config(&value.to_string()).expect("config parses");
+
+        assert_eq!(
+            config.wsl.path.as_deref(),
+            Some("/home/susu/.cargo/bin:/usr/bin:/bin")
+        );
     }
 
     #[test]

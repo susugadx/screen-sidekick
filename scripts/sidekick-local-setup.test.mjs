@@ -3,6 +3,10 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CONFIG_SCHEMA_VERSION,
+  CONFIG_SCHEMA_VERSION_V1,
+} from "./native-host-shared.mjs";
+import {
   runSetupWithFakeLocal,
   runSetupWithFakeWindows,
   validDaemonStatus,
@@ -47,6 +51,7 @@ test("install dry-run delegates Windows WSL manifest and config generation", () 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Would write .*com\.screen_sidekick\.host\.json/);
   assert.match(result.stdout, /chrome-extension:\/\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\//);
+  assert.match(result.stdout, new RegExp(`"schema_version": "${CONFIG_SCHEMA_VERSION}"`));
   assert.match(result.stdout, /"wsl_distro": "Ubuntu"/);
   assert.match(result.stdout, /"wsl_path": "\/home\/susu\/\.nvm\/versions\/node\/v22\.20\.0\/bin:\/home\/susu\/\.cargo\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin"/);
   assert.match(result.stdout, /Would run: reg add HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com\.screen_sidekick\.host/);
@@ -103,6 +108,30 @@ test("Windows install dry-run shows WSL build steps without executing them", () 
     /Would run \(build extension in WSL\): wsl\.exe -d Ubuntu-24\.04 --cd \/home\/test\/screen-sidekick -- npm --prefix apps\/extension run build/,
   );
   assert.equal(result.calls.some((call) => call.command === "cargo" || call.command === "npm"), false);
+});
+
+test("install rejects explicit WSL PATH when the Windows host binary is not config-compatible", () => {
+  const result = runSetupWithFakeWindows([
+    "install",
+    "--browser",
+    "edge",
+    "--extension-id",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "--host-path",
+    "C:\\Sidekick\\screen-sidekick-native-host.exe",
+    "--wsl-distro",
+    "Ubuntu-24.04",
+    "--wsl-workdir",
+    "/home/test/screen-sidekick",
+    "--wsl-path",
+    wslPath,
+    "--skip-build",
+  ], {
+    nativeHostConfigSchemaVersion: CONFIG_SCHEMA_VERSION_V1,
+  });
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--wsl-path requires a compatible native host binary/);
 });
 
 test("Windows install dry-run applies explicit WSL PATH to WSL build steps", () => {
@@ -217,7 +246,9 @@ test("invalid WSL PATH list is rejected before subprocess execution", () => {
 });
 
 test("Windows doctor reads installed config without requiring WSL path options", () => {
-  const result = runSetupWithFakeWindows(["doctor", "--browser", "edge"]);
+  const result = runSetupWithFakeWindows(["doctor", "--browser", "edge"], {
+    nativeHostConfigSchemaVersion: CONFIG_SCHEMA_VERSION_V1,
+  });
 
   assert.equal(result.status, 0, result.stdout);
   assert.match(result.stdout, /\[OK\] Windows registry manifest:/);
@@ -477,6 +508,52 @@ test("Windows doctor applies config WSL PATH to codex and daemon checks", () => 
       "--stdio-status",
     ],
   ]);
+});
+
+test("Windows doctor accepts legacy v0.1 config with WSL PATH when host binary is compatible", () => {
+  const result = runSetupWithFakeWindows(["doctor", "--browser", "edge"], {
+    config: {
+      ...validNativeHostConfig({ schema_version: CONFIG_SCHEMA_VERSION_V1 }),
+      wsl_path: wslPath,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /\[OK\] Windows native host config:/);
+  assert.match(
+    result.stdout,
+    /\[OK\] Windows native host config schema compatibility: screen_sidekick_native_host_config\.v0\.2/,
+  );
+  assert.match(result.stdout, /\[OK\] Codex CLI in WSL: codex 1\.2\.3/);
+});
+
+test("Windows doctor fails WSL PATH config when the registered host binary is older", () => {
+  const result = runSetupWithFakeWindows(["doctor", "--browser", "edge"], {
+    config: {
+      ...validNativeHostConfig({ schema_version: CONFIG_SCHEMA_VERSION_V1 }),
+      wsl_path: wslPath,
+    },
+    nativeHostConfigSchemaVersion: CONFIG_SCHEMA_VERSION_V1,
+  });
+
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(
+    result.stdout,
+    /\[FAIL\] Windows native host config schema compatibility: host binary must report screen_sidekick_native_host_config\.v0\.2 before using this config/,
+  );
+});
+
+test("Windows doctor fails v0.2 config without WSL PATH when the registered host binary is older", () => {
+  const result = runSetupWithFakeWindows(["doctor", "--browser", "edge"], {
+    config: validNativeHostConfig({ schema_version: CONFIG_SCHEMA_VERSION }),
+    nativeHostConfigSchemaVersion: CONFIG_SCHEMA_VERSION_V1,
+  });
+
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(
+    result.stdout,
+    /\[FAIL\] Windows native host config schema compatibility: host binary must report screen_sidekick_native_host_config\.v0\.2 before using this config/,
+  );
 });
 
 test("Windows doctor fails when WSL extension build output is missing", () => {

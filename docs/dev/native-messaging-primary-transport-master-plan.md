@@ -357,7 +357,12 @@ product center itself:
   `scripts/native-host-dev.mjs`.
 - Local setup can write an explicit `wsl_path` for Windows-launched
   non-interactive WSL commands, so build, doctor, and native-host startup do not
-  rely on interactive shell init files to find Cargo, npm, or Codex.
+  rely on interactive shell init files to find Cargo, npm, or Codex. That field
+  uses native-host config schema v0.2, and setup/doctor gate it on a compatible
+  Windows host exe. Doctor also gates any installed v0.2 config on the
+  registered host exe, even if `wsl_path` is omitted. The v0.2 reader also
+  accepts legacy v0.1 configs with `wsl_path` written by earlier local setup
+  builds.
 - The Windows native host exe is still provided explicitly by `--host-path` or
   `SCREEN_SIDEKICK_WINDOWS_HOST_PATH`; cross-building/copying that exe is not
   part of the first setup command.

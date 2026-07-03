@@ -2,8 +2,10 @@ import { Buffer } from "node:buffer";
 
 export const HOST_NAME = "com.screen_sidekick.host";
 export const DESCRIPTION = "Screen Sidekick Native Messaging Host";
-export const CONFIG_SCHEMA_VERSION = "screen_sidekick_native_host_config.v0.1";
+export const CONFIG_SCHEMA_VERSION_V1 = "screen_sidekick_native_host_config.v0.1";
+export const CONFIG_SCHEMA_VERSION = "screen_sidekick_native_host_config.v0.2";
 export const CONFIG_ENV = "SCREEN_SIDEKICK_NATIVE_HOST_CONFIG";
+export const PRINT_CONFIG_SCHEMA_VERSION_ARG = "--print-config-schema-version";
 export const BROWSERS = new Set(["chrome", "chrome-for-testing", "chromium", "edge"]);
 export const DAEMON_STATUS_SCHEMA_VERSION = "sidekick_daemon_status.v0.1";
 
@@ -69,7 +71,7 @@ export function validateWslAutoConfigValue(value) {
     }
   }
 
-  if (value.schema_version !== CONFIG_SCHEMA_VERSION) {
+  if (value.schema_version !== CONFIG_SCHEMA_VERSION && value.schema_version !== CONFIG_SCHEMA_VERSION_V1) {
     return { ok: false, error: "config schema_version is unsupported" };
   }
   if (value.mode !== "wsl_auto") {
@@ -115,6 +117,7 @@ export function validateWslAutoConfigValue(value) {
   return {
     ok: true,
     config: {
+      schemaVersion: value.schema_version,
       wslDistro: distro.value,
       wslWorkdir: workdir.value,
       wslDaemonBinary: daemonBinary.value,
@@ -218,6 +221,15 @@ function requiredConfigString(value, field) {
 
 export function isWindowsAbsolutePath(filePath) {
   return /^[A-Za-z]:[\\/]/.test(filePath) || /^\\\\/.test(filePath);
+}
+
+export function hostSchemaProbeEnv(baseEnv) {
+  const env = { ...baseEnv };
+  const tempDir = env.TEMP || env.TMP || "C:\\Windows\\Temp";
+  env[CONFIG_ENV] = joinWindowsPath(tempDir, "screen-sidekick-native-host-schema-probe-missing.json");
+  delete env.SCREEN_SIDEKICK_DAEMON_WS_URL;
+  delete env.SCREEN_SIDEKICK_DAEMON_TOKEN;
+  return env;
 }
 
 export function joinWindowsPath(...parts) {
